@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 环境与本地配置
+.env
+
+# 运行产物
+*.log
+
+# arch-viz 产物（docs/architecture.html 建议提交；trace 与 DATA 为本地运行数据）
+docs/trace.json
+docs/architecture.data.json
+
+CLAUDE.md
+
+.claude/
+docs/

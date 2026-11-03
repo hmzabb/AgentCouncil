@@ -1,0 +1,22 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>AgentCouncil 真实评测汇总</title><style>
+body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; max-width: 980px;
+       margin: 24px auto; padding: 0 16px; color: #1f2328; line-height: 1.6; }
+h1 { border-bottom: 2px solid #d0d7de; padding-bottom: 8px; }
+h2 { margin-top: 28px; border-left: 4px solid #0969da; padding-left: 8px; }
+h3 { margin-top: 20px; }
+.card { border: 1px solid #d0d7de; border-radius: 8px; padding: 12px 16px;
+        margin: 12px 0; background: #ffffff; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 12px;
+         color: #fff; font-weight: 600; font-size: 14px; }
+.meta { color: #57606a; font-size: 13px; }
+.vs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.vs .side { border: 1px solid #d0d7de; border-radius: 8px; padding: 10px 12px; }
+.vs .bull { border-left: 4px solid #1a7f37; }
+.vs .bear { border-left: 4px solid #cf222e; }
+table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+th, td { border: 1px solid #d0d7de; padding: 6px 10px; text-align: left; font-size: 14px; }
+th { background: #f6f8fa; }
+ul { margin: 4px 0; }
+.error { color: #cf222e; }
+.score { font-weight: 700; }
+</style></head><body><h1>AgentCouncil 真实评测汇总</h1><p class="meta">标的：600519.SH ｜ 运行次数：5（真实数据 + DeepSeek，逐次串行）</p><div class="card"><h2>1. 决策一致性</h2><table><tr><th>评级</th><th>次数</th></tr><tr><td>中性</td><td>1</td></tr><tr><td>减持</td><td>4</td></tr></table><p>众数评级：<b>减持</b> ｜ 一致率：<span class="score">80%</span> ｜ 置信度均值 0.62（标准差 0.0）</p></div><div class="card"><h2>2. 延迟（真实墙钟，秒）</h2><table><tr><th>指标</th><th>端到端</th><th>分析师并行</th><th>辩论</th><th>风控</th><th>经理</th></tr><tr><td>均值</td><td>32.17</td><td>7.57</td><td>15.682</td><td>4.828</td><td>4.087</td></tr><tr><td>P95/最大</td><td class="score">43.882</td><td>20.005</td><td>17.262</td><td>5.249</td><td>4.4</td></tr><tr><td>最小</td><td>26.518</td><td>-</td><td>-</td><td>-</td><td>-</td></tr></table><p class="meta">逐次样本：[43.882, 26.518, 31.274, 30.245, 28.93]</p></div><div class="card"><h2>3. 确定性质量指标</h2><ul><li>引用来源比例（报告带工具来源）：<span class="score">100%</span></li><li>辩论双侧论点比例：<span class="score">100%</span></li><li>管线错误留痕总数：0</li></ul></div><h2>4. LLM-as-Judge 评审（DeepSeek 真实评审）</h2><div class="card"><table><tr><th>维度</th><th>分数</th></tr><tr><td>报告事实性（15 份）</td><td class="score">4.93/5</td></tr><tr><td>报告相关性</td><td class="score">4.93/5</td></tr><tr><td>报告无幻觉</td><td class="score">4.8/5</td></tr><tr><td>论点有据率（幻觉率=1-有据率）</td><td class="score">100%（56/56 条）</td></tr><tr><td>辩论多方交锋（5 次）</td><td class="score">4.0/5</td></tr><tr><td>辩论空方交锋</td><td class="score">5.0/5</td></tr><tr><td>辩论对立覆盖</td><td class="score">4.2/5</td></tr><tr><td>评审失败次数</td><td>0</td></tr></table></div></body></html>

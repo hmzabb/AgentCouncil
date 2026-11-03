@@ -1,0 +1,50 @@
+{
+  "runs": 5,
+  "query": "600519.SH",
+  "consistency": {
+    "rating_counts": {
+      "中性": 1,
+      "减持": 4
+    },
+    "mode_rating": "减持",
+    "consistency_ratio": 0.8,
+    "confidence_mean": 0.62,
+    "confidence_stdev": 0.0
+  },
+  "latency_seconds": {
+    "mean": 32.17,
+    "p95": 43.882,
+    "min": 26.518,
+    "max": 43.882,
+    "samples": [
+      43.882,
+      26.518,
+      31.274,
+      30.245,
+      28.93
+    ],
+    "by_stage": {
+      "analyst_parallel": {
+        "mean": 7.57,
+        "max": 20.005
+      },
+      "debate": {
+        "mean": 15.682,
+        "max": 17.262
+      },
+      "risk_review": {
+        "mean": 4.828,
+        "max": 5.249
+      },
+      "manager_summarize": {
+        "mean": 4.087,
+        "max": 4.4
+      }
+    }
+  },
+  "deterministic_quality": {
+    "citation_ratio": 1.0,
+    "debate_both_sides_ratio": 1.0,
+    "pipeline_error_count": 0
+  }
+}

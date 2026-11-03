@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentCouncil - 多智能体金融分析</title>
+<style>
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d38;--text:#e1e4eb;--muted:#8b8fa3;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--purple:#a855f7;--radius:10px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.6}
+.container{max-width:860px;margin:0 auto;padding:24px 20px 60px}
+header{text-align:center;padding:36px 0 28px}
+header h1{font-size:28px;font-weight:700}
+header p{color:var(--muted);margin-top:6px;font-size:14px}
+.search-bar{display:flex;gap:10px;margin-bottom:28px}
+.search-bar input{flex:1;padding:12px 16px;font-size:15px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);outline:none}
+.search-bar input:focus{border-color:var(--accent)}
+.search-bar input::placeholder{color:var(--muted)}
+.search-bar button{padding:12px 28px;font-size:15px;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer}
+.search-bar button:hover{opacity:.88}
+.search-bar button:disabled{opacity:.45;cursor:not-allowed}
+.status-bar{display:flex;align-items:center;gap:12px;padding:12px 16px;margin-bottom:20px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);font-size:14px;color:var(--muted)}
+.status-bar .spinner{width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;display:none}
+.status-bar.running .spinner{display:block}
+.status-bar .timer{margin-left:auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.section{margin-bottom:18px}
+.section-title{font-size:15px;font-weight:600;padding:10px 14px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);display:flex;align-items:center;gap:8px}
+.section-title .dot{width:8px;height:8px;border-radius:50%;background:var(--border)}
+.section-title .dot.done{background:var(--green)}
+.section-title .dot.running{background:var(--accent);animation:pulse 1.2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.card-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:8px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;font-size:13px}
+.card .card-header{font-weight:600;font-size:14px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.card .confidence{font-size:12px;color:var(--muted);margin-top:8px}
+.card .key-point{padding:2px 0;color:var(--muted)}
+.card .key-point::before{content:"- ";color:var(--accent)}
+.debate-round{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-top:8px;font-size:13px}
+.debate-round .round-no{font-weight:600;margin-bottom:8px;color:var(--muted)}
+.debate-round .side{margin-bottom:6px}
+.debate-round .bull .side-label{color:var(--green)}
+.debate-round .bear .side-label{color:var(--red)}
+.risk-list{list-style:none;margin-top:8px}
+.risk-list li{padding:10px 14px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:6px;font-size:13px}
+.risk-list .risk-title{font-weight:600}
+.risk-list .risk-meta{color:var(--muted);font-size:12px;margin-top:4px}
+.final-card{background:linear-gradient(135deg,#1a1d27 0%,#1e2232 100%);border:1.5px solid var(--accent);border-radius:var(--radius);padding:20px 24px;margin-top:12px}
+.final-card .rating{font-size:22px;font-weight:700;margin-bottom:8px}
+.final-card .rating.buy,.final-card .rating.overweight{color:var(--green)}
+.final-card .rating.hold{color:var(--yellow)}
+.final-card .rating.underweight{color:#fca5a5}
+.final-card .rating.sell{color:var(--red)}
+.final-card .summary{font-size:14px;line-height:1.7;margin-bottom:12px}
+.final-card .risk-hint{font-size:13px;color:var(--yellow);margin-top:4px}
+.final-card .risk-hint::before{content:"! "}
+.error-msg{padding:10px 14px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:var(--radius);font-size:13px;color:var(--red);margin-top:8px}
+.prompts{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.prompts button{padding:6px 14px;font-size:13px;background:var(--card);border:1px solid var(--border);border-radius:20px;color:var(--muted);cursor:pointer;transition:all .2s}
+.prompts button:hover{border-color:var(--accent);color:var(--text)}
+@media(max-width:640px){.card-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="container">
+<header><h1>AgentCouncil</h1><p>三分析师并行 - 多空辩论 - 风控评审 - 基金经理五档评级</p></header>
+<div class="prompts" id="prompts"></div>
+<div class="search-bar">
+<input type="text" id="queryInput" placeholder="输入股票代码，如 600519.SH（贵州茅台）" autofocus>
+<button id="startBtn" onclick="start()">开始分析</button>
+</div>
+<div class="status-bar" id="statusBar">
+<div class="spinner"></div><span id="statusText">等待输入</span><span class="timer" id="timer"></span>
+</div>
+<div id="output"></div>
+</div>
+<script>
+var $=document.querySelector.bind(document);
+var running=false,timerInterval=null,startTime=0,eventSource=null;
+var analystHTML="",debateHTML="",riskHTML="",finalHTML="",errorHTML="",analystCount=0;
+var PROMPTS=[{label:"贵州茅台",query:"600519.SH"},{label:"宁德时代",query:"300750.SZ"},{label:"比亚迪",query:"002594.SZ"},{label:"新能源汽车",query:"新能源汽车"}];
+function initPrompts(){PROMPTS.forEach(function(p){var b=document.createElement("button");b.textContent=p.label;b.onclick=function(){$("#queryInput").value=p.query;start()};$("#prompts").appendChild(b)})}
+function setStatus(t,r){$("#statusText").textContent=t;$("#statusBar").classList.toggle("running",!!r)}
+function startTimer(){startTime=Date.now();timerInterval=setInterval(function(){var s=((Date.now()-startTime)/1000).toFixed(1);$("#timer").textContent=s+"s"},200)}
+function stopTimer(){clearInterval(timerInterval)}
+function h(s){return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
+function rc(l){return l==="高"?"#ef4444":l==="中"?"#eab308":"#22c55e"}
+function rc2(r){var m={"买入":"buy","增持":"overweight","中性":"hold","减持":"underweight","卖出":"sell"};return m[r]||""}
+function renderAnalyst(r){return'<div class="card"><div class="card-header">'+(r.role==="基本面"?"\u{1F52C}":r.role==="技术面"?"\u{1F4C8}":"\u{1F4F0}")+" "+h(r.role)+"分析</div><div>"+h(r.summary||"")+"</div>"+(r.key_points||[]).map(function(p){return'<div class="key-point">'+h(p)+"</div>"}).join("")+'<div class="confidence">置信度：'+((r.confidence||0)*100).toFixed(0)+"%</div>"+(r.tool_errors&&r.tool_errors.length?'<div class="error-msg">工具错误：'+h(r.tool_errors.join("; "))+"</div>":"")+"</div>"}
+function renderDebate(r){return'<div class="debate-round"><div class="round-no">辩论第 '+r.round_no+" 轮</div><div class=\"side bull\"><span class=\"side-label\">多方：</span>"+h(r.bull_argument||"")+"</div><div class=\"side bear\"><span class=\"side-label\">空方：</span>"+h(r.bear_argument||"")+"</div></div>"}
+function renderDebateRpt(r){return'<div class="debate-round" style="border-color:var(--purple)"><div class="round-no">辩论汇总（共 '+r.total_rounds+" 轮）</div><div class=\"side bull\"><span class=\"side-label\">多方论点：</span>"+h((r.pro_arguments||[]).join("；"))+"</div><div class=\"side bear\"><span class=\"side-label\">空方论点：</span>"+h((r.con_arguments||[]).join("；"))+'</div><div style="margin-top:8px;color:var(--muted)">'+h(r.conclusion||"")+"</div></div>"}
+function renderRisk(r){var items=(r.risks||[]).map(function(ri){return'<li><div class="risk-title">'+h(ri.title)+' <span style="color:'+rc(ri.level)+'">['+ri.level+"风险]</span></div><div class=\"risk-meta\">"+h(ri.description)+" &rarr; "+h(ri.mitigation)+"</div></li>"}).join("");return'<div><div style="font-weight:600;font-size:14px;margin-top:8px">整体风险：<span style="color:'+rc(r.risk_level)+'">'+r.risk_level+"</span>"+(r.blocked?" 一票否决":"")+'</div><ul class="risk-list">'+items+"</ul><div style=\"font-size:13px;color:var(--muted)\">"+h(r.comment||"")+"</div></div>"}
+function renderFinal(d){return'<div class="final-card"><div class="rating '+rc2(d.rating)+'">'+h(d.rating)+" &middot; 置信度 "+((d.confidence||0)*100).toFixed(0)+"%</div><div class=\"summary\">"+h(d.summary||"")+"</div><div style=\"font-size:13px;color:var(--muted);margin-bottom:8px\">"+h(d.reasoning||"")+"</div>"+(d.risk_hints||[]).map(function(rh){return'<div class="risk-hint">'+h(rh)+"</div>"}).join("")+"</div>"}
+function refresh(){var a=analystHTML?'<div class="section"><div class="section-title"><span class="dot '+(analystCount===3?"done":"running")+'"></span>分析师报告（'+analystCount+'/3）</div><div class="card-grid">'+analystHTML+"</div></div>":"";var d=debateHTML?'<div class="section"><div class="section-title"><span class="dot running"></span>多空辩论</div>'+debateHTML+"</div>":"";$("#output").innerHTML=a+d+riskHTML+finalHTML+errorHTML}
+function start(){if(running)return;var q=$("#queryInput").value.trim();if(!q)return;running=true;$("#startBtn").disabled=true;analystHTML="";debateHTML="";riskHTML="";finalHTML="";errorHTML="";analystCount=0;$("#output").innerHTML="";$("#timer").textContent="";stopTimer();startTimer();eventSource=new EventSource("/stream?query="+encodeURIComponent(q));eventSource.addEventListener("run_started",function(){setStatus("分析启动中...",true)});eventSource.addEventListener("analyst_team_started",function(){setStatus("三分析师并行执行...",true)});eventSource.addEventListener("analyst_report",function(e){var r=JSON.parse(e.data);analystCount++;analystHTML+=renderAnalyst(r);setStatus("分析师报告："+analystCount+"/3",true);refresh()});eventSource.addEventListener("debate_round",function(e){var r=JSON.parse(e.data);debateHTML+=renderDebate(r);setStatus("多空辩论中... 第 "+r.round_no+" 轮",true);refresh()});eventSource.addEventListener("debate_report",function(e){var r=JSON.parse(e.data);debateHTML+=renderDebateRpt(r);setStatus("辩论汇总完成",true);refresh()});eventSource.addEventListener("risk_report",function(e){var r=JSON.parse(e.data);riskHTML='<div class="section"><div class="section-title"><span class="dot done"></span>风控评审</div>'+renderRisk(r)+"</div>";setStatus("风控评审完成",true);refresh()});eventSource.addEventListener("final_decision",function(e){var d=JSON.parse(e.data);finalHTML=renderFinal(d);setStatus("最终决策已产出",true);refresh()});eventSource.addEventListener("done",function(e){stopTimer();running=false;$("#startBtn").disabled=false;eventSource.close();var d=JSON.parse(e.data);var el=d.elapsed_s?d.elapsed_s.toFixed(1):"--";setStatus("分析完成 - 总耗时 "+el+"s",false);$("#statusBar").classList.remove("running")});eventSource.addEventListener("error",function(e){try{var d=JSON.parse(e.data);errorHTML+='<div class="error-msg">节点 '+h(d.node)+" 错误："+h((d.messages||[]).join("；"))+"</div>";refresh()}catch(_){}});eventSource.onerror=function(){if(running){stopTimer();running=false;$("#startBtn").disabled=false;setStatus("连接中断",false);$("#statusBar").classList.remove("running")}}}
+$("#queryInput").addEventListener("keydown",function(e){if(e.key==="Enter")start()});
+initPrompts();
+</script>
+</body>
+</html>

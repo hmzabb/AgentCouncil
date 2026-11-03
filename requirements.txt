@@ -1,0 +1,27 @@
+# ===== AgentCouncil 依赖 =====
+# 安装（官方 PyPI 源：清华镜像缺 langgraph）：
+#   python -m pip install -r requirements.txt -i https://pypi.org/simple
+
+# ----- 基础设施 / 图编排 -----
+langgraph>=1.0,<2
+langchain-core>=1.0,<2
+pydantic>=2.7,<3
+python-dotenv>=1.0,<2
+
+# ----- 数据层：行情 / 向量库 / 嵌入（Phase 3） -----
+pymilvus>=2.5,<3              # docker Milvus 客户端（本地库 milvus-standalone:19530）
+akshare>=1.16                 # 行情与研报数据源（东方财富/交易所披露）
+sentence-transformers>=3,<5   # bge 嵌入模型本地加载（依赖 torch，CPU 版即可）
+pymupdf>=1.24                 # PDF 文本抽取（data/ingest.py 切分研报）
+pandas>=2.0                   # MA/RSI/MACD 指标计算
+
+# ----- LLM（Phase 2：DeepSeek） -----
+langchain-openai>=1.0,<2      # DeepSeek OpenAI 兼容客户端（ChatOpenAI）+ 结构化输出
+
+# ----- 服务层（Phase 4：FastAPI + SSE 流式） -----
+fastapi>=0.110,<1             # SSE 流式服务（api/server.py）
+uvicorn>=0.29,<1              # ASGI 服务器
+httpx>=0.27,<1                # FastAPI TestClient 依赖（eval/api_test.py）
+
+# ----- 后续阶段预留 -----
+# Phase 5：ragas（LLM-as-Judge 评测）
