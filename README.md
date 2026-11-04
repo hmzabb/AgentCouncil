@@ -27,7 +27,6 @@
 - [✨ 核心特性](#-核心特性)
 - [🏗 架构设计](#-架构设计)
   - [运行时流程（Agent 执行链路）](#运行时流程agent-执行链路)
-  - [SSE 事件时序](#sse-事件时序)
   - [共享状态（CouncilState）](#共享状态councilstate)
 - [🚀 快速开始](#-快速开始)
 - [📦 安装与部署](#-安装与部署)
@@ -68,46 +67,7 @@
 
 ### 运行时流程（Agent 执行链路）
 
-```mermaid
-flowchart TB
-    classDef input fill:#e3f2fd,stroke:#2196f3
-    classDef parallel fill:#e8f5e9,stroke:#4caf50
-    classDef loop fill:#fff3e0,stroke:#ff9800
-    classDef decision fill:#f3e5f5,stroke:#9c27b0
-    classDef output fill:#fce4ec,stroke:#e91e63
-
-    Q["📥 query<br/>股票代码 / 行业关键词"]:::input --> AT
-
-    AT["analyst_team<br/>分发器节点<br/>(返回 Command(goto=[Send...]))"]:::input
-
-    AT -->|"Send 图级 fan-out<br/>三路并行执行"| A1 & A2 & A3
-
-    subgraph Parallel["🔬 分析师并行团队"]
-        direction LR
-        A1["基本面分析师<br/>财务数据 + 估值分析<br/>━━━━━━━━━━━<br/>工具: financials.py"]:::parallel
-        A2["技术面分析师<br/>MA / RSI / MACD 指标<br/>━━━━━━━━━━━<br/>工具: market_data.py"]:::parallel
-        A3["情绪面分析师<br/>新闻舆情 + 研报 RAG<br/>━━━━━━━━━━━<br/>工具: news.py / rag.py"]:::parallel
-    end
-
-    A1 & A2 & A3 -->|"LangGraph fan-in<br/>三报告自动汇聚"| RD
-
-    subgraph Debate["⚔️ 多空辩论循环"]
-        RD["researcher_debate<br/>多空双方逐轮辩论"]:::loop
-        RD -->|"未达 max_rounds<br/>(conditional_edges 回环)"| RD
-    end
-
-    RD -->|"辩论结束 → 下一节点"| RR
-
-    RR["🛡️ risk_review<br/>LLM 风险清单<br/>+ 代码兜底规则<br/>(LLM 无法绕过)"]:::decision
-
-    RR --> MS
-
-    MS["📊 manager_summarize<br/>基金经理综合决策<br/>五档评级 + 置信度<br/>+ 风控一票权上限"]:::decision
-
-    MS --> OUT
-
-    OUT["📤 final_decision<br/>JSON / SSE 流式输出"]:::output
-```
+![alt text](photos/architecture.png)
 
 
 ### 共享状态（CouncilState）
