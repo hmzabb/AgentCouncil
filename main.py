@@ -21,7 +21,6 @@ import uuid
 from typing import Any
 
 import config as config_module  # 动态读取配置（打印当前模式）
-
 from graph.builder import build_council_graph
 
 DEFAULT_QUERY: str = "600519.SH"
@@ -35,7 +34,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--query",
         default=DEFAULT_QUERY,
-        help="股票代码或行业关键词（默认：%s）" % DEFAULT_QUERY,
+        help=f"股票代码或行业关键词（默认：{DEFAULT_QUERY}）",
     )
     parser.add_argument(
         "--show-analysts",

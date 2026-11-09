@@ -33,6 +33,9 @@
   - [详细环境配置](#详细环境配置)
   - [Milvus 本地库](#milvus-本地库)
   - [启动 SSE 流式服务](#启动-sse-流式服务)
+  - [Docker Compose 一键部署](#docker-compose-一键部署)
+  - [可观测性（`/metrics`）](#可观测性metrics)
+  - [CI（GitHub Actions + 本地复现）](#cigithub-actions--本地复现)
 - [⚙️ 配置参考](#️-配置参考)
 - [📖 使用指南](#-使用指南)
   - [CLI 命令行](#cli-命令行)
@@ -53,7 +56,7 @@
 
 - **🔬 三分析师并行**：基本面、技术面、情绪面 —— LangGraph Send 图级 fan-out 并行执行，角色各司其职，不互相替代
 - **⚔️ 多轮多空辩论**：研究员多空双方逐轮辩论，conditional_edges + max_rounds 防死循环，辩论全程可追溯
-- **🛡️ 风控一票权**：LLM 风险清单 + 代码兜底规则（LLM 无法绕过）→ 高风险上限减持 / blocked 强制卖出
+- **🛡️ 风控一票权**：LLM 风险清单 + 代码兜底规则（LLM 无法绕过）→ V1 信息不可用 / V2 技术面破位 / V3 高波动双阈值否决；高风险上限减持 / blocked 强制卖出
 - **📊 五档评级体系**：买入(Buy) / 增持(Overweight) / 中性(Hold) / 减持(Underweight) / 卖出(Sell)，经理综合决策 + 置信度
 - **🔄 全链路 fail-open**：工具失败 → `ToolResult(ok=False)`，Agent 失败 → `status=failed` 合法结构化输出，节点失败 → 降级产物 + 错误留痕 `state.errors`，**任何单点失败不中断整条链路**
 - **🌐 真实数据接入**：AkShare 行情（MA/RSI/MACD）、东财估值/同花顺财务摘要、个股新闻；Milvus + bge 研报向量检索
@@ -115,6 +118,9 @@ python main.py --query "600519.SH" --show-analysts --show-debate
 ```
 
 > **提示**：conda 用户可直接使用 `D:/Python/Conda/envs/agentcouncil` 虚拟环境（Python 3.12）。如 conda 默认源被 ToS 拦截，创建环境时加 `--override-channels -c https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main`。
+>
+> **一键部署替代方案**：项目内置 `Dockerfile` + `docker-compose.yml`（API 服务 + etcd + minio + Milvus standalone），
+> 可用 `docker compose up -d --build` 一次拉起全部依赖，详见下文「Docker Compose 一键部署」。
 
 ---
 
@@ -156,7 +162,66 @@ curl -N "http://127.0.0.1:8000/stream?query=600519.SH"
 curl "http://127.0.0.1:8000/analyze" -X POST \
   -H "Content-Type: application/json" \
   -d '{"query":"600519.SH"}'
+
+# Prometheus 指标（文本格式，可直接被 Prometheus 抓取）
+curl "http://127.0.0.1:8000/metrics"
 ```
+
+### Docker Compose 一键部署
+
+```bash
+# 1. 准备配置（compose 通过 env_file 读取 .env）
+cp .env.example .env
+
+# 2. 拉起 API 服务 + etcd + minio + Milvus standalone
+docker compose up -d --build
+
+# 3. 宿主机执行建库（容器内 Milvus 已就绪，端口映射到 19530）
+python data/ingest.py
+
+# 4. 验证
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/metrics
+```
+
+| 文件 | 作用 |
+|------|------|
+| `Dockerfile` | API 服务镜像：`python:3.11-slim` + CPU 版 torch（避免 CUDA 版本撑爆镜像）+ 内置 `HEALTHCHECK` |
+| `.dockerignore` | 构建上下文裁剪（排除 `.env`、`volumes/`、运行产物、评测存档） |
+| `docker-compose.yml` | 四服务编排；`MILVUS_HOST` 在 compose 网络内覆盖为服务名 `standalone`，宿主机仍走 `localhost:19530` |
+
+> **权重缓存**：bge 权重约 1.3GB，compose 将 `HF_HOME` 挂到 `./volumes/hf`，容器重建不会重复下载。
+
+### 可观测性（`/metrics`）
+
+`/metrics` 输出 Prometheus 文本格式，零额外依赖（不引入 prometheus_client）：
+
+| 指标 | 类型 | 说明 |
+|------|------|------|
+| `agentcouncil_http_requests_total{method,endpoint,status}` | counter | 按方法/端点/状态码分组的请求数 |
+| `agentcouncil_http_request_duration_seconds_sum{...}` / `_count{...}` | counter | 延迟累加值与样本数（可算平均延迟） |
+| `agentcouncil_http_requests_inflight` | gauge | 当前进行中请求数（判断是否过载） |
+| `agentcouncil_tool_cache_hits_total` / `_entries` | counter / gauge | 工具 TTL 缓存命中数与条目数 |
+| `agentcouncil_mock_mode` | gauge | 当前是否 mock 模式（`1`=mock，`0`=真实） |
+
+### CI（GitHub Actions + 本地复现）
+
+```bash
+# 本地跑与 CI 完全相同的检查（语法编译 / ruff / pytest mock 用例 / A/B 框架冒烟）
+python scripts/ci.py
+```
+
+CI 工作流见 `.github/workflows/ci.yml`，三个 job：
+
+| job | 内容 |
+|-----|------|
+| `lint` | `ruff check .` + `ruff format --check`（格式差异仅提示，不阻塞） |
+| `test` | 仅装轻量依赖（不装 torch/akShare/pymilvus），跑 `pytest -m mock` + `eval/ab_test.py` 冒烟 |
+| `docker` | `docker build` + `docker compose config` 校验编排文件 |
+
+> **为什么 mock 用例能被 pytest 收集**：`eval/*.py` 是独立评测脚本（场景函数按 `scenario_*` 命名），
+> pytest 默认收集 `test_*`，直接跑会「0 tests collected」——CI 假绿。因此新增 `eval/test_suites.py`
+> 包装 mock 场景为 `test_*` 用例，并把 `python_files` 收紧为 `test_*.py`（避免导入强制真实模式的脚本互相覆盖 `MOCK_MODE`）。
 
 ---
 
@@ -200,7 +265,7 @@ python main.py --query "新能源汽车"
 ### 测试套件
 
 ```bash
-# mock 链路冒烟测试（固定 MOCK_MODE=true，3 场景）
+# mock 链路冒烟测试（固定 MOCK_MODE=true，5 场景）
 python -m eval.smoke_test
 
 # 真实数据链路测试（6 场景：RAG/行情/财务/新闻 + 全链路 + fail-open）
@@ -214,6 +279,16 @@ python -m eval.api_test
 
 # 并行 vs 串行端到端耗时对比（Send 图级并行 vs 单节点串行，真实计时）
 python -m eval.parallelism_test
+
+# A/B 对比框架（配对采样 + McNemar 精确检验 + 配对差值 bootstrap 95%CI）
+python -m eval.ab_test --repeats 3 --tickers 600519.SH
+python -m eval.ab_test --real --a debate_max_rounds=1 --b debate_max_rounds=3   # 真实链路
+
+# pytest 统一入口（CI 使用；只含 mock 用例，确定性零成本）
+pytest -m mock
+
+# 本地复现 CI 全部检查
+python scripts/ci.py
 ```
 
 ### API 端点
@@ -223,6 +298,7 @@ python -m eval.parallelism_test
 | `/stream?query=<str>` | `GET` | SSE 流式推送（各角色报告 + 最终决策） |
 | `/analyze` | `POST` | 非流式最终决策 JSON |
 | `/health` | `GET` | 健康检查 |
+| `/metrics` | `GET` | Prometheus 文本格式指标（请求量/延迟/缓存/模式） |
 
 ---
 
@@ -234,6 +310,11 @@ AgentCouncil/
 ├── README.md                # 本文件
 ├── requirements.txt         # Python 依赖
 ├── .env.example             # 环境变量配置示例
+├── Dockerfile               # API 服务镜像（CPU torch + HEALTHCHECK）
+├── .dockerignore            # 构建上下文裁剪
+├── docker-compose.yml       # API + etcd + minio + Milvus standalone 编排
+├── .github/workflows/ci.yml # CI：lint / pytest(mock) / docker build
+├── scripts/ci.py            # 本地复现 CI（跨平台）
 ├── config.py                # 全局配置（环境变量读取，fail-open 回退）
 ├── main.py                  # CLI 入口（graph.invoke → final_decision JSON）
 │
@@ -268,10 +349,12 @@ AgentCouncil/
 │   └── server.py            # FastAPI + SSE 流式（/stream /analyze /health）
 │
 └── eval/                    # 评测体系
-    ├── smoke_test.py        # mock 链路冒烟测试（3 场景）
+    ├── smoke_test.py        # mock 链路冒烟测试（4 场景）
     ├── real_data_test.py    # 真实数据链路测试（6 场景）
     ├── llm_test.py          # DeepSeek 接入测试（4 场景）
     ├── api_test.py          # FastAPI + SSE 测试（3 场景）
+    ├── test_suites.py       # pytest 统一入口（包装 mock 场景为 test_* 用例，供 CI 收集）
+    ├── ab_test.py           # A/B 对比框架（配对采样 + McNemar + bootstrap CI）
     ├── parallelism_test.py  # 并行 vs 串行耗时对比
     ├── run_eval.py          # 真实评测驱动：N 次运行存档 + 一致性/延迟统计
     ├── judge.py             # LLM-as-Judge：报告质量 + 辩论有效性评审
@@ -335,6 +418,32 @@ AgentCouncil/
 - 风控「信息不完整」→ 必上高风险
 - 整体风险等级 → 取清单最高
 - 经理评级 → 受风控一票权上限约束：高风险 → 上限减持 / blocked → 强制卖出
+
+**一票否决（确定性规则，阈值全部来自配置）**
+
+| 规则 | 触发条件 | 依据 |
+| --- | --- | --- |
+| V1 信息不可用 | 分析师阶段无任何有效报告 | `RISK_VETO_ON_MISSING_DATA` |
+| V2 技术面破位 | MA5<MA20<MA60 空头排列 + MACD 柱为负 + RSI 破位 | `RISK_VETO_RSI_FLOOR` |
+| V3 高波动 | 近 20 日年化波动率 ≥ 60% **且** 近 60 日最大回撤 ≥ 25% | `RISK_VETO_ANNUAL_VOL_PCT` / `RISK_VETO_DRAWDOWN_PCT` |
+
+**确定性风险项（由代码按量化指标追加）**
+
+| 风险项 | 触发条件 | 依据 |
+| --- | --- | --- |
+| 极端波动 | 单日涨跌幅绝对值 ≥ 9.5% | `RISK_EXTREME_MOVE_PCT` |
+| ATR 放大（高） | ATR14 占收盘价 ≥ 5% | `RISK_ATR_SPIKE_PCT` |
+| 量价背离（中） | 60 日区间位置 ≥ 0.8 **且** 量比 ≤ 0.8 | `RISK_DIVERGENCE_POSITION` / `RISK_DIVERGENCE_RATIO` |
+
+**量化指标口径**（[tools/market_data.py](tools/market_data.py) 的 `compute_risk_metrics`，纯 Python 实现、可单测）
+
+| 指标 | 计算方式 |
+| --- | --- |
+| `volatility_20d_pct` | 近 20 个日收益率样本标准差 × √252 |
+| `max_drawdown_60d_pct` | 近 60 日相对区间内前高的最大跌幅（负数） |
+| `atr14` / `atr_pct` | Wilder ATR14（TR = max(H-L, \|H-C_prev\|, \|L-C_prev\|)）及占收盘价比例 |
+| `volume_ratio_5d` | 近 5 日均量 / 近 20 日均量（>1 放量、<1 缩量） |
+| `position_60d` | 收盘价在近 60 日 [最低, 最高] 区间的相对位置（0~1） |
 
 ### 📐 Milvus 索引选型
 

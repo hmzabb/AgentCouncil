@@ -110,9 +110,12 @@ class ManagerAgent(BaseAgent[FinalDecision]):
         else:
             cap = None
         if cap is not None and _RATING_ORDER.index(rating) < _RATING_ORDER.index(cap):
+            if risk is not None and risk.blocked:
+                trigger = f"风控一票否决（{risk.block_reason}）"
+            else:
+                trigger = f"风险等级为{risk.risk_level}"
             reasoning = (
-                f"{reasoning}（风控一票权：风险等级为{risk.risk_level}，"
-                f"评级上限 {cap}，原评级 {rating} 已截断）"
+                f"{reasoning}（{trigger}，评级上限 {cap}，原评级 {rating} 已截断）"
             )
             rating = cap
 
@@ -203,10 +206,13 @@ class ManagerAgent(BaseAgent[FinalDecision]):
         return rating, confidence, summary, reasoning, key_points
 
     def _risk_hints(self, risk: RiskReviewReport | None) -> list[str]:
-        """风险提示：取风控清单的等级 + 缓释措施（确定性）。"""
+        """风险提示：取风控清单的等级 + 缓释措施（确定性）；否决原因置顶。"""
         if risk is None:
             return ["风控评审缺失，请谨慎决策。"]
-        return [f"{item.level}风险：{item.title}——{item.mitigation}" for item in risk.risks]
+        hints: list[str] = [f"{item.level}风险：{item.title}——{item.mitigation}" for item in risk.risks]
+        if risk.blocked:
+            hints.insert(0, f"风控一票否决：{risk.block_reason}")
+        return hints
 
     def _collect_sources(
         self, ok_reports: list[AnalystReport], debate: DebateReport | None

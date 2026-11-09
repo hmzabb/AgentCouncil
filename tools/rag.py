@@ -27,9 +27,9 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import config as config_module
 from pydantic import BaseModel, Field
 
+import config as config_module
 from tools.base import BaseTool
 
 # 单个 Milvus RPC 硬超时（秒）：集合卡在 Loading 时这些 RPC 会无限阻塞

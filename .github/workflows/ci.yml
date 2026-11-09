@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install "ruff>=0.4"
+      - name: Ruff check
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check . || echo "format diff found (non-blocking)"
+
+  test:
+    name: Tests (mock 链路，零外部依赖)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install minimal deps (mock 测试不需要 torch / akShare / pymilvus)
+        run: |
+          python -m pip install --upgrade pip
+          pip install "langgraph>=1.0,<2" "langchain-core>=1.0,<2" "pydantic>=2.7,<3" \
+                      "python-dotenv>=1.0,<2" "fastapi>=0.110,<1" "uvicorn>=0.29,<1" \
+                      "httpx>=0.27,<1" "pytest>=8,<9" "pytest-cov>=6,<7"
+      - name: Pytest (mock 用例)
+        run: pytest -m mock --cov --cov-report=term-missing
+      - name: A/B 统计框架冒烟（mock 链路，验证框架本身可跑通）
+        run: python -m eval.ab_test --repeats 2 --tickers 600519.SH
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            .coverage
+            htmlcov/
+          if-no-files-found: ignore
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t agentcouncil:ci .
+      - name: Verify compose file
+        run: |
+          cp .env.example .env   # compose 的 env_file 需要 .env 存在（仓库不提交真实 .env）
+          docker compose config > /dev/null

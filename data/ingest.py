@@ -129,7 +129,7 @@ def download_sample_pdfs(raw_dir: Path, symbol: str, limit: int = 4) -> list[Pat
         try:
             resp = requests.get(row["url"], headers=_HTTP_HEADERS, timeout=60)
             resp.raise_for_status()
-            if len(resp.content) < 10_000 or not resp.content[:5] == b"%PDF-":
+            if len(resp.content) < 10_000 or resp.content[:5] != b"%PDF-":
                 logger.warning("跳过非 PDF 响应：%s（%d 字节）", row["url"], len(resp.content))
                 continue
             dest.write_bytes(resp.content)

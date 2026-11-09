@@ -1,0 +1,65 @@
+[tool.pytest.ini_options]
+testpaths = ["eval"]
+# 只收集 test_*.py（eval/test_suites.py）：其余 eval/*_test.py 是独立评测脚本，
+# 模块导入即固定 MOCK_MODE（smoke/api 为 true，real/llm/golden 为 false），
+# 若被 pytest 收集会互相覆盖模式，导致 mock 用例读到真实配置。
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+]
+markers = [
+    "slow: slow tests (deselect with '-m \"not slow\"')",
+    "mock: tests in mock mode (no LLM cost)",
+    "real: tests requiring real LLM/config",
+]
+
+[tool.coverage.run]
+source = ["agents", "graph", "tools", "data", "config.py"]
+omit = [
+    "*/tests/*",
+    "eval/*",
+    "venv/*",
+    ".venv/*",
+]
+relative_files = true
+
+[tool.coverage.report]
+exclude_also = [
+    "def __repr__",
+    "if self\\.debug",
+    "if settings\\.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+precision = 2
+show_missing = true
+skip_covered = false
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["venv", ".venv", ".git", "__pycache__", "eval/runs", "eval/baselines"]
+
+# 显式声明规则集，避免 ruff 新版本扩大默认集后 CI 突然变红（版本漂移）。
+# 选型原则：只保留「能发现真实缺陷」的规则，噪声型规则显式忽略并说明原因。
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # 中文注释/文档字符串必然包含全角字符，ambiguous-unicode 三兄弟是纯噪声
+    "RUF001", "RUF002", "RUF003",
+    # 隐式字符串拼接是本项目的排版风格（HTML 模板逐行拼接），不视为缺陷
+    "ISC004",
+    # 存量 noqa 覆盖的是未启用的规则；RUF100 会让「只忽略必要规则」的意图被反复推翻
+    "RUF100",
+]

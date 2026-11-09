@@ -36,6 +36,7 @@ class CouncilState(TypedDict, total=False):
 
     query: str                                             # 输入：股票代码或行业关键词
     assigned_role: str                                     # Send 并行：分发给单个分析师的角色（分支内可见）
+    deadline_ts: float                                     # 全链路预算：monotonic 截止时间戳（<=0 表示不限制）
     messages: Annotated[list[BaseMessage], add_messages]   # 过程消息（可追溯 + LLM 上下文预留）
     analyst_reports: Annotated[list[AnalystReport], operator.add]   # 分析师报告（Send 并行结果聚合）
     debate_round: int                                      # 辩论轮次计数（conditional_edges 防死循环）

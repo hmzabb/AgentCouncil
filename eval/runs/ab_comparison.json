@@ -1,0 +1,214 @@
+{
+  "variant_a": {
+    "samples": 2,
+    "direction_accuracy": 0.0,
+    "rating_avg_distance": 1,
+    "rating_distribution": {
+      "中性": 2
+    },
+    "confidence": {
+      "n": 2,
+      "mean": 0.71,
+      "median": 0.71,
+      "std": 0.0,
+      "min": 0.71,
+      "max": 0.71
+    },
+    "latency_seconds": {
+      "n": 2,
+      "mean": 0.009,
+      "median": 0.009,
+      "std": 0.002,
+      "min": 0.007,
+      "max": 0.011
+    },
+    "debate_rounds": {
+      "n": 2,
+      "mean": 1.0,
+      "median": 1.0,
+      "std": 0.0,
+      "min": 1.0,
+      "max": 1.0
+    },
+    "tokens": {
+      "n": 2,
+      "mean": 0.0,
+      "median": 0.0,
+      "std": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "blocked_rate": 0.0,
+    "pipeline_error_rate": 0.0,
+    "consistency": {
+      "repeats_per_ticker": [
+        2
+      ],
+      "rating_agreement_mean": 1.0,
+      "per_ticker": {
+        "600519.SH": {
+          "ratings": [
+            "中性",
+            "中性"
+          ],
+          "mode_ratio": 1.0
+        }
+      }
+    }
+  },
+  "variant_b": {
+    "samples": 2,
+    "direction_accuracy": 0.0,
+    "rating_avg_distance": 1,
+    "rating_distribution": {
+      "中性": 2
+    },
+    "confidence": {
+      "n": 2,
+      "mean": 0.71,
+      "median": 0.71,
+      "std": 0.0,
+      "min": 0.71,
+      "max": 0.71
+    },
+    "latency_seconds": {
+      "n": 2,
+      "mean": 0.011,
+      "median": 0.011,
+      "std": 0.003,
+      "min": 0.008,
+      "max": 0.014
+    },
+    "debate_rounds": {
+      "n": 2,
+      "mean": 3.0,
+      "median": 3.0,
+      "std": 0.0,
+      "min": 3.0,
+      "max": 3.0
+    },
+    "tokens": {
+      "n": 2,
+      "mean": 0.0,
+      "median": 0.0,
+      "std": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "blocked_rate": 0.0,
+    "pipeline_error_rate": 0.0,
+    "consistency": {
+      "repeats_per_ticker": [
+        2
+      ],
+      "rating_agreement_mean": 1.0,
+      "per_ticker": {
+        "600519.SH": {
+          "ratings": [
+            "中性",
+            "中性"
+          ],
+          "mode_ratio": 1.0
+        }
+      }
+    }
+  },
+  "comparison": {
+    "n_pairs": 2,
+    "direction_match": {
+      "n_pairs": 2,
+      "a_only_correct": 0,
+      "b_only_correct": 0,
+      "both_correct": 0,
+      "both_wrong": 2,
+      "p_value": 1.0,
+      "significant_at_0.05": false,
+      "test": "McNemar exact (binomial two-sided)",
+      "note": "样本量小时 p 值天然偏大，结论需结合置信区间与样本量一起看"
+    },
+    "latency_diff_b_minus_a": {
+      "n": 2,
+      "mean_diff": 0.002,
+      "ci95": [
+        -0.003,
+        0.007
+      ],
+      "crosses_zero": true,
+      "method": "paired bootstrap, 10000 resamples, seed=20261108"
+    },
+    "debate_rounds_diff_b_minus_a": {
+      "n": 2,
+      "mean_diff": 2,
+      "ci95": [
+        2,
+        2
+      ],
+      "crosses_zero": false,
+      "method": "paired bootstrap, 10000 resamples, seed=20261108"
+    }
+  },
+  "verdict": [
+    "方向匹配率无统计显著差异（McNemar p>=0.05 或样本不足）",
+    "延迟无可观测差异（bootstrap 95%CI 跨 0）",
+    "辩论轮次随配置变化 2 轮（95%CI [2, 2]）"
+  ],
+  "raw_pairs": [
+    {
+      "ticker": "600519.SH",
+      "repeat": 0,
+      "a_rating": "中性",
+      "b_rating": "中性",
+      "a_seconds": 0.011,
+      "b_seconds": 0.008,
+      "a_rounds": 1,
+      "b_rounds": 3,
+      "a_tools": [
+        "get_financials",
+        "get_market_data",
+        "get_news",
+        "research_rag"
+      ],
+      "b_tools": [
+        "get_financials",
+        "get_market_data",
+        "get_news",
+        "research_rag"
+      ]
+    },
+    {
+      "ticker": "600519.SH",
+      "repeat": 1,
+      "a_rating": "中性",
+      "b_rating": "中性",
+      "a_seconds": 0.007,
+      "b_seconds": 0.014,
+      "a_rounds": 1,
+      "b_rounds": 3,
+      "a_tools": [
+        "get_financials",
+        "get_market_data",
+        "get_news",
+        "research_rag"
+      ],
+      "b_tools": [
+        "get_financials",
+        "get_market_data",
+        "get_news",
+        "research_rag"
+      ]
+    }
+  ],
+  "mode": "mock",
+  "tickers": [
+    "600519.SH"
+  ],
+  "repeats": 2,
+  "config_a": {
+    "debate_max_rounds": "1"
+  },
+  "config_b": {
+    "debate_max_rounds": "3"
+  },
+  "generated_at": "2026-11-09 15:02:25",
+  "caveat": "mock 链路使用确定性占位数据，方向匹配率/评级距离仅用于验证统计框架本身，不代表决策质量；质量结论须用 --real 在真实数据链路下得出"
+}

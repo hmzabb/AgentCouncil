@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import Any, Callable
+import time
+from collections.abc import Callable
+from typing import Any
 
 from langchain_core.messages import AIMessage
 from langgraph.types import Command, Send
@@ -47,6 +49,30 @@ ROLE_CONFIDENCE: dict[str, float] = {"基本面": 0.68, "技术面": 0.73, "情�
 # （langgraph 1.2 不再接受裸 list[Send]，须用 Command.goto 承载图级并行分发）
 NodeReturn = dict[str, Any] | Command  # type: ignore[misc] —— Command 无需参数化
 NodeFunc = Callable[[CouncilState], NodeReturn]
+
+
+class PipelineBudgetExceeded(RuntimeError):
+    """全链路预算（PIPELINE_DEADLINE_S）耗尽。
+
+    由节点内 _budget_guard 抛出，经 fail_open_node 降级为该节点的失败态产物，
+    保证超预算时链路仍能收敛出一个明确结论（而非无限等待）。
+    """
+
+
+def _budget_guard(state: CouncilState) -> None:
+    """检查全链路剩余预算：耗尽则抛 PipelineBudgetExceeded。
+
+    预算以 monotonic 时间戳写入 state.deadline_ts（由 analyst_team 分发器初始化），
+    deadline_ts<=0 表示未启用预算控制。每次调用都重新读取配置，
+    支持运行期调整 PIPELINE_DEADLINE_S。
+    """
+    deadline: float = float(state.get("deadline_ts") or 0.0)
+    if deadline <= 0.0:
+        return
+    if time.monotonic() >= deadline:
+        raise PipelineBudgetExceeded(
+            f"全链路预算耗尽（PIPELINE_DEADLINE_S={config_module.CONFIG.pipeline_deadline_s}s）"
+        )
 
 
 def fail_open_node(fallback: Callable[[Exception, CouncilState], NodeReturn]):
@@ -86,7 +112,7 @@ def fail_open_node(fallback: Callable[[Exception, CouncilState], NodeReturn]):
         # 分发器失败也 fail-open：错误作为 Command.update 写回 state，
         # goto 仍照常分发全部角色，保证链路不中断
         update={"errors": [f"节点 analyst_team 失败: {type(exc).__name__}: {exc}"]},
-        goto=_build_analyst_sends(state.get("query", "")),
+        goto=_build_analyst_sends(state.get("query", ""), _init_deadline(state)),
     )
 )
 def run_analyst_team(state: CouncilState) -> Command:
@@ -97,15 +123,29 @@ def run_analyst_team(state: CouncilState) -> Command:
     可单独重试、天然支持断点续跑。
 
     注意：Send 分支的输入 state 只含 payload 字段，因此必须把分支内
-    需要的全部上下文（query、assigned_role）显式放入每个 Send 的 payload。
+    需要的全部上下文（query、assigned_role、deadline_ts）显式放入每个 Send 的 payload。
+    同时把 deadline_ts 写回主 state，供后续串行节点继续沿用同一预算。
     """
-    return Command(goto=_build_analyst_sends(state["query"]))
+    deadline: float = _init_deadline(state)
+    return Command(
+        update={"deadline_ts": deadline},
+        goto=_build_analyst_sends(state["query"], deadline),
+    )
 
 
-def _build_analyst_sends(query: str) -> list[Send]:
+def _init_deadline(state: CouncilState) -> float:
+    """初始化全链路截止时间（幂等：断点续跑/重入时复用既有预算）。"""
+    existing: float = float(state.get("deadline_ts") or 0.0)
+    if existing > 0.0:
+        return existing
+    budget: int = config_module.CONFIG.pipeline_deadline_s
+    return time.monotonic() + budget if budget > 0 else 0.0
+
+
+def _build_analyst_sends(query: str, deadline_ts: float = 0.0) -> list[Send]:
     """构造分析师团队的 Send 分发列表（每个角色一个并行分支）。"""
     return [
-        Send("analyst", {"assigned_role": role, "query": query})
+        Send("analyst", {"assigned_role": role, "query": query, "deadline_ts": deadline_ts})
         for role in ANALYST_ROLES
     ]
 
@@ -130,6 +170,7 @@ def run_analyst(state: CouncilState) -> dict[str, Any]:
 
     assigned_role 由 dispatcher 的 Send payload 注入（仅本分支可见）。
     """
+    _budget_guard(state)
     role: str = state.get("assigned_role", "未知")
     agent = AnalystAgent(role=role, confidence=ROLE_CONFIDENCE.get(role, 0.70))
     report: AnalystReport = agent.run(state)
@@ -167,6 +208,7 @@ def run_analyst_team_serial(state: CouncilState) -> dict[str, Any]:
     执行后一次性聚合 analyst_reports；由 eval/parallelism_test.py 通过
     build_council_graph(serial_analysts=True) 挂载，主链路不使用。
     """
+    _budget_guard(state)
     reports: list[AnalystReport] = []
     errors: list[str] = []
     for role in ANALYST_ROLES:
@@ -206,7 +248,7 @@ def run_researcher_debate(state: CouncilState) -> dict[str, Any]:
     循环由 conditional_edges（route_after_debate）+ debate_round 计数实现，
     max_rounds 保证无论节点成败循环都能终止。
     """
-    query: str = state["query"]
+    _budget_guard(state)
     round_no: int = state.get("debate_round", 0) + 1
     round_result: DebateRound = ResearcherAgent(round_no=round_no).run(state)
     update: dict[str, Any] = {"debate_round": round_no, "debate_history": [round_result]}
@@ -215,7 +257,7 @@ def run_researcher_debate(state: CouncilState) -> dict[str, Any]:
     update["messages"] = [AIMessage(content=f"【trace】辩论第 {round_no} 轮完成")]
     # 达到最大轮次：聚合历史产出收敛报告（真实模式 LLM 汇总，失败降级模板）
     if round_no >= config_module.CONFIG.debate_max_rounds:
-        history: list[DebateRound] = list(state.get("debate_history", [])) + [round_result]
+        history: list[DebateRound] = [*state.get("debate_history", []), round_result]
         update["debate_report"] = ResearcherAgent(round_no=round_no).synthesize(state, history)
     return update
 
@@ -253,6 +295,7 @@ def route_after_debate(state: CouncilState) -> str:
 )
 def run_risk_review(state: CouncilState) -> dict[str, Any]:
     """risk_review 节点：风控评审。"""
+    _budget_guard(state)
     report: RiskReviewReport = RiskAgent().run(state)
     update: dict[str, Any] = {"risk_report": report}
     if report.error:
@@ -282,6 +325,7 @@ def run_manager_summarize(state: CouncilState) -> dict[str, Any]:
 
     fail-open 保证：无论上游任何阶段失败，本节点必然产出 final_decision。
     """
+    _budget_guard(state)
     report: FinalDecision = ManagerAgent().run(state)
     update: dict[str, Any] = {"final_decision": report}
     if report.error:

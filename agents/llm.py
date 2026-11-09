@@ -22,16 +22,50 @@ import logging
 import re
 from typing import Any, TypeVar
 
-import config as config_module  # 动态读取配置（测试期 reload_config 切换场景）
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
+
+import config as config_module  # 动态读取配置（测试期 reload_config 切换场景）
+from tools.cache import TTLCache, make_cache_key
 
 logger = logging.getLogger(__name__)
 
 TOutput = TypeVar("TOutput", bound=BaseModel)
 
 _LLM_TEMPERATURE: float = 0.2
+
+# Token 追踪器（评测用）：评测脚本 enable_token_tracking() 后，
+# 每次 structured_call 会累积记录 (caller_tag, usage_dict)
+_token_tracking_enabled: bool = False
+_token_records: list[tuple[str, dict[str, int]]] = []
+
+# LLM 结构化输出缓存：同 (模型, schema, system, human) 命中直接复用，
+# 避免同一标的重复分析时重复计费。评测（token 追踪开启）时自动禁用，
+# 保证成本与延迟统计反映真实调用。
+_LLM_CACHE: TTLCache = TTLCache(ttl_s=0, max_entries=128)
+
+
+def enable_token_tracking() -> None:
+    """开启 token 追踪（评测前调用）。"""
+    global _token_tracking_enabled, _token_records
+    _token_tracking_enabled = True
+    _token_records.clear()
+
+
+def disable_token_tracking() -> None:
+    """关闭 token 追踪并返回累积记录。"""
+    global _token_tracking_enabled
+    _token_tracking_enabled = False
+    return list(_token_records)
+
+
+def get_and_reset_token_records() -> list[tuple[str, dict[str, int]]]:
+    """获取并清空 token 记录（评测每轮后调用）。"""
+    global _token_records
+    records = list(_token_records)
+    _token_records.clear()
+    return records
 
 # 公共系统提示（所有 Agent 共用）：json_object 模式要求 prompt 中出现 json 字样
 SYSTEM_ROLE_HINT: str = (
@@ -68,17 +102,53 @@ def _parse_json_content(content: Any) -> dict[str, Any]:
     return data
 
 
-def structured_call(schema_cls: type[TOutput], system: str, human: str) -> TOutput:
+def structured_call(
+    schema_cls: type[TOutput], system: str, human: str,
+    track_tokens: bool = False,
+) -> TOutput | tuple[TOutput, dict[str, int]]:
     """单次结构化调用：system/human 提示词 → json_object 输出 → Pydantic 严格校验。
 
     参数：
-        schema_cls: 输出 schema（Pydantic v2，extra=forbid）。
-        system:     系统提示词（须含角色 + 输出字段说明）。
-        human:      本轮上下文（工具数据 / 上游报告等）。
+        schema_cls:  输出 schema（Pydantic v2，extra=forbid）。
+        system:      系统提示词（须含角色 + 输出字段说明）。
+        human:       本轮上下文（工具数据 / 上游报告等）。
+        track_tokens: True 时返回 (output, token_usage_dict)，用于评测成本追踪。
 
     任何失败（未配置 key / 网络 / JSON 非法 / 字段校验不过）都向上抛异常，
     由 Agent 层 fail-open 降级（见各 Agent 的模板回退路径）。
     """
+    # ---------- 缓存查询（评测 token 追踪开启时禁用，保证成本/延迟真实）----------
+    cache_key: str = ""
+    cache_enabled: bool = (
+        not _token_tracking_enabled and config_module.CONFIG.llm_cache_ttl_s > 0
+    )
+    if cache_enabled:
+        _LLM_CACHE.ttl_s = config_module.CONFIG.llm_cache_ttl_s
+        cache_key = make_cache_key(
+            "llm",
+            {
+                "model": config_module.CONFIG.deepseek_model,
+                "schema": schema_cls.__name__,
+                "system": system,
+                "human": human,
+            },
+        )
+        hit, cached = _LLM_CACHE.get(cache_key)
+        if hit:
+            try:
+                cached_result = schema_cls.model_validate(cached)
+            except Exception:  # noqa: BLE001 —— 缓存与当前 schema 不兼容则忽略并重算
+                pass
+            else:
+                logger.info("LLM 缓存命中：%s（跳过真实调用）", schema_cls.__name__)
+                if track_tokens:
+                    return cached_result, {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    }
+                return cached_result
+
     model = get_chat_model().bind(response_format={"type": "json_object"})
     prompt = ChatPromptTemplate.from_messages([("system", system), ("human", "{input}")])
     chain = prompt | model
@@ -87,4 +157,51 @@ def structured_call(schema_cls: type[TOutput], system: str, human: str) -> TOutp
     # 模型偶发带回 {"type": "json_object"} 等无害附加字段：剔除未声明字段后
     # 再严格校验（内容字段仍受 extra=forbid 与全部约束保护）
     clean: dict[str, Any] = {k: v for k, v in data.items() if k in schema_cls.model_fields}
-    return schema_cls.model_validate(clean)
+    result = schema_cls.model_validate(clean)
+    if cache_enabled:
+        _LLM_CACHE.set(cache_key, result.model_dump())
+
+    # 提取 token 用量（如果追踪开启）
+    if _token_tracking_enabled:
+        usage: dict[str, int] = {}
+        if hasattr(message, "usage_metadata") and message.usage_metadata:
+            um = message.usage_metadata
+            usage = {
+                "prompt_tokens": int(um.get("input_tokens", 0)),
+                "completion_tokens": int(um.get("output_tokens", 0)),
+                "total_tokens": int(um.get("total_tokens", 0)),
+            }
+        else:
+            tu = (message.response_metadata or {}).get("token_usage", {})
+            if tu:
+                usage = {
+                    "prompt_tokens": int(tu.get("prompt_tokens", 0)),
+                    "completion_tokens": int(tu.get("completion_tokens", 0)),
+                    "total_tokens": int(tu.get("total_tokens", 0)),
+                }
+        if not usage:
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        _token_records.append((schema_cls.__name__, usage))
+
+    if not track_tokens:
+        return result
+    # 公开 token 提取（兼容旧调用）
+    usage: dict[str, int] = {}
+    if hasattr(message, "usage_metadata") and message.usage_metadata:
+        um = message.usage_metadata
+        usage = {
+            "prompt_tokens": int(um.get("input_tokens", 0)),
+            "completion_tokens": int(um.get("output_tokens", 0)),
+            "total_tokens": int(um.get("total_tokens", 0)),
+        }
+    else:
+        tu = (message.response_metadata or {}).get("token_usage", {})
+        if tu:
+            usage = {
+                "prompt_tokens": int(tu.get("prompt_tokens", 0)),
+                "completion_tokens": int(tu.get("completion_tokens", 0)),
+                "total_tokens": int(tu.get("total_tokens", 0)),
+            }
+    return result, usage if usage else {
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+    }

@@ -24,9 +24,9 @@ from __future__ import annotations
 import math
 from typing import Any
 
-import config as config_module
 from pydantic import BaseModel, Field
 
+import config as config_module
 from tools.base import BaseTool
 from tools.market_data import normalize_symbol
 

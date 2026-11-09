@@ -10,6 +10,17 @@ venv/
 # 运行产物
 *.log
 
+# docker compose 持久化卷（etcd / minio / milvus / bge 权重）
+volumes/
+
+# 本地命令输出（调试重定向文件）
+ab_out.txt
+api_out*.txt
+pip_out.txt
+smoke_out.txt
+pytest_out.txt
+enc_out.txt
+
 # arch-viz 产物（docs/architecture.html 建议提交；trace 与 DATA 为本地运行数据）
 docs/trace.json
 docs/architecture.data.json

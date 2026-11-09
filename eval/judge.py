@@ -32,11 +32,12 @@ import os  # noqa: E402
 
 os.environ.setdefault("MOCK_MODE", "false")
 
+from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
+
 import config as config_module  # noqa: E402
 from agents.analyst import ANALYST_ROLES, AnalystAgent  # noqa: E402
 from agents.llm import SYSTEM_ROLE_HINT, structured_call  # noqa: E402
 from agents.schemas import AnalystReport, DebateRound  # noqa: E402
-from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 RUNS_DIR: Path = Path(__file__).resolve().parent / "runs"
 
@@ -123,7 +124,7 @@ def judge_report(role: str, report: AnalystReport, data_text: str) -> tuple[dict
         f"给定数据（分析师收到的全部工具数据）：\n{data_text}\n\n"
         f"分析师报告全文：\n摘要：{report.summary}\n"
         + "".join(f"论点 {i + 1}：{k}\n" for i, k in enumerate(report.key_points))
-        + f"\n请输出评审 JSON。"
+        + "\n请输出评审 JSON。"
     )
     verdict, error = _safe_judge(ReportQualityVerdict, system=system, human=human)
     if verdict is None:
@@ -151,16 +152,35 @@ def _collect_data_contexts(query: str) -> dict[str, str]:
     """为每个角色重建「给定数据」文本（与分析链路完全相同的工具取数）。
 
     当日数据稳定：三个角色各取一次，全部运行共用（运行间隔数分钟内）。
+    工具集合使用角色默认集；报告若记录了自己的 tools_used，
+    评审时优先用报告自身的工具集重建（见 _context_for_report）。
     """
     contexts: dict[str, str] = {}
     for role in ANALYST_ROLES:
         agent = AnalystAgent(role=role, confidence=0.70)
-        context, tool_errors, sources = agent.collect_context(query)
+        context, tool_errors, _sources = agent.collect_context(query)
         text = agent.describe_context(context)
         if tool_errors:
             text += f"\n（工具失败留痕：{'；'.join(tool_errors)}）"
         contexts[role] = text
     return contexts
+
+
+def _context_for_report(report: Any, role: str, query: str, cache: dict[str, str]) -> str:
+    """按报告实际使用的工具集重建「给定数据」文本（未记录则用角色默认集缓存）。"""
+    tools: list[str] = list(getattr(report, "tools_used", []) or [])
+    if not tools:
+        return cache.get(role, "")
+    key: str = f"{role}::{','.join(tools)}"
+    if key in cache:
+        return cache[key]
+    agent = AnalystAgent(role=role, confidence=0.70)
+    context, tool_errors, _sources = agent.collect_context(query, tools=tools)
+    text = agent.describe_context(context)
+    if tool_errors:
+        text += f"\n（工具失败留痕：{'；'.join(tool_errors)}）"
+    cache[key] = text
+    return text
 
 
 def judge_runs(run_ids: list[int], query: str) -> dict[str, Any]:
@@ -179,8 +199,11 @@ def judge_runs(run_ids: list[int], query: str) -> dict[str, Any]:
             continue
         artifact: dict[str, Any] = json.loads(artifact_path.read_text(encoding="utf-8"))
         for report in artifact["analyst_reports"]:
+            parsed = AnalystReport.model_validate(report)
             verdict, error = judge_report(
-                report["role"], AnalystReport.model_validate(report), data_contexts[report["role"]]
+                report["role"],
+                parsed,
+                _context_for_report(parsed, report["role"], query, data_contexts),
             )
             entry: dict[str, Any] = {"run_id": run_id, "role": report["role"]}
             if verdict is None:

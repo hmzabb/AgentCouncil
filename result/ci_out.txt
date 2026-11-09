@@ -1,0 +1,44 @@
+
+>>> 语法编译 (compileall)
+    D:\Python\Conda\python.exe -m compileall -q agents graph tools data api eval config.py main.py
+    => PASS (exit 0)
+
+>>> ruff 未安装：跳过静态检查（pip install ruff 后可复现 CI 的 lint 任务）
+
+>>> pytest (mock)
+    D:\Python\Conda\python.exe -m pytest -q -m mock
+============================= test session starts =============================
+platform win32 -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0
+rootdir: D:\zmz\project\AgentCouncil
+configfile: pyproject.toml
+testpaths: eval
+plugins: anyio-4.12.1, langsmith-0.14.17, cov-7.1.0
+collected 11 items
+
+eval\test_suites.py ...........                                          [100%]
+
+============================= 11 passed in 0.96s ==============================
+    => PASS (exit 0)
+
+>>> A/B 冒烟 (mock)
+    D:\Python\Conda\python.exe -m eval.ab_test --repeats 2 --tickers 600519.SH
+- A 方向匹配率 0.0，B 方向匹配率 0.0
+- A 延迟均值 0.008s，B 延迟均值 0.007s
+- A 评级一致率 1.0，B 评级一致率 1.0
+- 说明：mock 链路使用确定性占位数据，方向匹配率/评级距离仅用于验证统计框架本身，不代表决策质量；质量结论须用 --real 在真实数据链路下得出
+
+结果已保存：D:\zmz\project\AgentCouncil\eval\runs\ab_comparison.json
+Deserializing unregistered type agents.schemas.AgentStatus from checkpoint. This will be blocked in a future version. Set LANGGRAPH_STRICT_MSGPACK=true to block now, or add to allowed_msgpack_modules to allow explicitly: [('agents.schemas', 'AgentStatus')]
+Deserializing unregistered type agents.schemas.AnalystReport from checkpoint. This will be blocked in a future version. Set LANGGRAPH_STRICT_MSGPACK=true to block now, or add to allowed_msgpack_modules to allow explicitly: [('agents.schemas', 'AnalystReport')]
+Deserializing unregistered type agents.schemas.DebateRound from checkpoint. This will be blocked in a future version. Set LANGGRAPH_STRICT_MSGPACK=true to block now, or add to allowed_msgpack_modules to allow explicitly: [('agents.schemas', 'DebateRound')]
+Deserializing unregistered type agents.schemas.DebateReport from checkpoint. This will be blocked in a future version. Set LANGGRAPH_STRICT_MSGPACK=true to block now, or add to allowed_msgpack_modules to allow explicitly: [('agents.schemas', 'DebateReport')]
+Deserializing unregistered type agents.schemas.RiskReviewReport from checkpoint. This will be blocked in a future version. Set LANGGRAPH_STRICT_MSGPACK=true to block now, or add to allowed_msgpack_modules to allow explicitly: [('agents.schemas', 'RiskReviewReport')]
+Deserializing unregistered type agents.schemas.FinalDecision from checkpoint. This will be blocked in a future version. Set LANGGRAPH_STRICT_MSGPACK=true to block now, or add to allowed_msgpack_modules to allow explicitly: [('agents.schemas', 'FinalDecision')]
+    => PASS (exit 0)
+
+=== 汇总 ===
+  PASS  语法编译
+  PASS  pytest mock 用例
+  PASS  A/B 统计框架冒烟
+
+全部通过

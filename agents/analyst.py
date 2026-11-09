@@ -1,6 +1,12 @@
 """分析师团队：基本面 / 技术面 / 情绪面 三名分析师，图级 Send 并行。
 
-各角色工具链（已全部接入真实数据源）：
+工具自采（自主性）：每名分析师先由 LLM 规划本轮要调用的工具集合
+（plan_tools），代码做白名单校验（只允许本角色可用的工具）后执行，
+最终实际调用的工具记录在 AnalystReport.tools_used。
+- 角色允许集（_ROLE_ALLOWED_TOOLS）宽于默认集（_ROLE_DEFAULT_TOOLS）；
+- mock 模式 / LLM 规划失败 → 直接使用默认集（fail-open，不阻断分析）。
+
+各角色默认工具链（已全部接入真实数据源）：
 - 基本面：get_financials（AkShare 东财估值 + 同花顺财务摘要）+
   get_news（AkShare 东财个股新闻）；
 - 技术面：get_market_data（AkShare 前复权日线 → MA/RSI/MACD）；
@@ -27,7 +33,12 @@ from typing import Any
 import config as config_module  # 动态读取配置（测试期 reload_config 切换场景）
 from agents.base import BaseAgent
 from agents.llm import SYSTEM_ROLE_HINT, structured_call
-from agents.schemas import AgentStatus, AnalystLlmOutput, AnalystReport
+from agents.schemas import (
+    AgentStatus,
+    AnalystLlmOutput,
+    AnalystReport,
+    ToolPlanLlmOutput,
+)
 from graph.state import CouncilState
 from tools.mock_tools import call_tool
 
@@ -35,6 +46,38 @@ logger = logging.getLogger(__name__)
 
 # 分析师角色（CLAUDE.md 架构要求：三分析师并行 Send）
 ANALYST_ROLES: tuple[str, ...] = ("基本面", "技术面", "情绪面")
+
+# 工具目录（工具自采的候选池：名称 → 能力描述，供 LLM 规划时参考）
+TOOL_CATALOG: dict[str, str] = {
+    "get_financials": "财务指标：PE/PB/ROE/营收增速/净利增速/报告期（东财 + 同花顺）",
+    "get_market_data": "行情与技术指标：收盘价/涨跌幅/MA5/MA20/MA60/RSI14/MACD（前复权日线）",
+    "get_news": "个股新闻与公告：标题/时间/摘要（东财资讯）",
+    "research_rag": "研报向量检索：相关研报片段与来源元数据（Milvus + bge）",
+}
+
+# 角色允许调用的工具（白名单，代码强制校验：LLM 规划越界一律裁剪）
+_ROLE_ALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
+    "基本面": ("get_financials", "get_news", "research_rag"),
+    "技术面": ("get_market_data", "get_news"),
+    "情绪面": ("get_news", "research_rag", "get_market_data"),
+}
+
+# 角色默认工具（mock 模式 / 规划失败时使用，也是最小必要集）
+_ROLE_DEFAULT_TOOLS: dict[str, tuple[str, ...]] = {
+    "基本面": ("get_financials", "get_news"),
+    "技术面": ("get_market_data",),
+    "情绪面": ("get_news", "research_rag"),
+}
+
+_TOOL_PLAN_SYSTEM_PROMPT: str = (
+    SYSTEM_ROLE_HINT
+    + "\n你的角色：{role}分析师的工具规划器。任务：判断分析「{query}」需要调用哪些数据工具。"
+    + "\n可选工具（只能从这里选，不得编造工具名）：\n{catalog}"
+    + "\n输出 JSON 对象，字段如下："
+    + "\n- tools: 字符串数组，按重要性排序的工具名（1~4 个）；"
+    + "\n- reason: 字符串，一句话说明为什么需要这些工具。"
+    + "\n要求：中文；优先选与本角色维度直接相关的工具；不要输出【stub】字样。"
+)
 
 # 各角色职责边界：只产出自己维度、不替别人决策（system prompt 强制）
 _ROLE_BOUNDARIES: dict[str, str] = {
@@ -75,60 +118,111 @@ class AnalystAgent(BaseAgent[AnalystReport]):
         self.role = role
         self.confidence = confidence
 
-    def collect_context(self, query: str) -> tuple[dict[str, Any], list[str], list[str]]:
-        """按角色收集工具数据（execute 与评测评审复用同一「给定数据」）。
+    def plan_tools(self, query: str) -> tuple[list[str], str | None, str | None]:
+        """工具自采规划：LLM 决定调用哪些工具，代码白名单校验后返回。
+
+        返回：
+            (tools, reason, plan_error)——
+            tools:      实际执行的工具列表（已与角色白名单求交，保证非空）；
+            reason:     LLM 给出的规划理由（mock / 失败时为 None）；
+            plan_error: 规划失败留痕（fail-open，回退默认工具集）。
+
+        安全边界：LLM 只能从角色白名单（_ROLE_ALLOWED_TOOLS）中选，
+        越界/编造的工具名一律裁剪；裁剪后为空则回退默认工具集。
+        """
+        defaults: list[str] = list(_ROLE_DEFAULT_TOOLS.get(self.role, ()))
+        if config_module.CONFIG.mock_mode:
+            return defaults, None, None
+        allowed: set[str] = set(_ROLE_ALLOWED_TOOLS.get(self.role, tuple(defaults)))
+        catalog: str = "\n".join(
+            f"- {name}: {desc}" for name, desc in TOOL_CATALOG.items() if name in allowed
+        )
+        try:
+            plan: ToolPlanLlmOutput = structured_call(
+                ToolPlanLlmOutput,
+                system=_TOOL_PLAN_SYSTEM_PROMPT.format(role=self.role, query=query, catalog=catalog),
+                human=f"分析目标：{query}\n请输出本轮工具规划 JSON。",
+            )
+        except Exception as exc:  # noqa: BLE001 —— fail-open：规划失败回退默认工具
+            logger.warning("分析师 [%s] 工具规划失败（回退默认工具集）：%s", self.name, exc)
+            return defaults, None, f"工具规划失败（已回退默认工具集）: {type(exc).__name__}: {exc}"
+        selected: list[str] = [t for t in plan.tools if t in allowed]
+        if not selected:
+            return defaults, plan.reason, "工具规划结果全部越界（已回退默认工具集）"
+        return selected[:4], plan.reason, None
+
+    def collect_context(
+        self, query: str, tools: list[str] | None = None
+    ) -> tuple[dict[str, Any], list[str], list[str]]:
+        """按指定工具收集数据（execute 与评测评审复用同一「给定数据」）。
+
+        参数：
+            query: 分析目标。
+            tools: 本次要调用的工具列表；None 表示使用角色默认工具集。
 
         返回：
             (context, tool_errors, sources)——
-            context:     角色工具数据的原始 dict（market / rag_chunks / financials / news）；
+            context:     工具数据的原始 dict（market / rag_chunks / financials / news）；
             tool_errors: 工具失败留痕（fail-open，不中断）；
             sources:     依据来源列表（过程可追溯）。
         评测用途（eval/judge.py）：LLM-as-Judge 评审「论点是否有据」时，
-        用本方法 + describe_context 重建与报告完全相同的给定数据文本。
+        用本方法（传入报告记录的 tools_used）+ describe_context 重建同一份给定数据。
         """
+        selected: list[str] = (
+            list(tools) if tools is not None else list(_ROLE_DEFAULT_TOOLS.get(self.role, ()))
+        )
         tool_errors: list[str] = []
         sources: list[str] = []
         context: dict[str, Any] = {}
-        if self.role == "基本面":
-            context["financials"] = self._collect_financials(query, tool_errors, sources)
-            context["news"] = self._collect_news(query, 2, tool_errors, sources)
-        elif self.role == "技术面":
-            market = call_tool("get_market_data", symbol=query)
-            if market.ok and market.data:
-                context["market"] = market.data
-                sources.append(self._market_source(market.data))
-            else:
-                tool_errors.append(f"get_market_data: {market.error}")
-        else:  # 情绪面
-            context["news"] = self._collect_news(query, 3, tool_errors, sources)
-            rag = call_tool("research_rag", query=query, top_k=3)
-            if rag.ok and rag.data:
-                chunks: list[dict[str, Any]] = rag.data["chunks"]
-                context["rag_chunks"] = chunks
-                sources.append(f"研报检索 {len(chunks)} 条（Milvus）")
-                for c in chunks:
-                    meta = c.get("metadata") or {}
-                    label = str(meta.get("source") or c.get("doc_name"))
-                    sources.append(f"　└ {label}（相似度 {c.get('score')}）")
-            else:
-                tool_errors.append(f"research_rag: {rag.error}")
+        news_limit: int = 3 if self.role == "情绪面" else 2
+        for name in selected:
+            if name == "get_financials":
+                context["financials"] = self._collect_financials(query, tool_errors, sources)
+            elif name == "get_market_data":
+                market = call_tool("get_market_data", symbol=query)
+                if market.ok and market.data:
+                    context["market"] = market.data
+                    sources.append(self._market_source(market.data))
+                else:
+                    tool_errors.append(f"get_market_data: {market.error}")
+            elif name == "get_news":
+                context["news"] = self._collect_news(query, news_limit, tool_errors, sources)
+            elif name == "research_rag":
+                rag = call_tool("research_rag", query=query, top_k=3)
+                if rag.ok and rag.data:
+                    chunks: list[dict[str, Any]] = rag.data["chunks"]
+                    context["rag_chunks"] = chunks
+                    sources.append(f"研报检索 {len(chunks)} 条（Milvus）")
+                    for c in chunks:
+                        meta = c.get("metadata") or {}
+                        label = str(meta.get("source") or c.get("doc_name"))
+                        sources.append(f"　└ {label}（相似度 {c.get('score')}）")
+                else:
+                    tool_errors.append(f"research_rag: {rag.error}")
         return context, tool_errors, sources
 
     def execute(self, state: CouncilState) -> AnalystReport:
         query: str = state["query"]
 
-        # ---------- 1) 工具取数（与模式无关：mock 拿占位数据，真实拿真实数据）----------
-        context, tool_errors, sources = self.collect_context(query)
+        # ---------- 1) 工具自采 + 取数（mock 拿占位数据，真实拿真实数据）----------
+        tools, plan_reason, plan_error = self.plan_tools(query)
+        context, tool_errors, sources = self.collect_context(query, tools=tools)
+        if plan_error:
+            tool_errors.append(plan_error)
+        if plan_reason:
+            sources.append(f"工具自采：{', '.join(tools)}（规划理由：{plan_reason}）")
 
         # ---------- 2) 产出：mock → 模板；真实 → LLM 主路径 + 模板降级 ----------
         if config_module.CONFIG.mock_mode:
-            return self._template_report(query, context, tool_errors, sources, degraded=False)
+            report = self._template_report(query, context, tool_errors, sources, degraded=False)
+            return report.model_copy(update={"tools_used": tools})
         try:
             out: AnalystLlmOutput = self._llm_report(query, context)
         except Exception as exc:  # noqa: BLE001 —— fail-open：LLM 失败降级模板
             logger.warning("分析师 [%s] LLM 调用失败（降级模板）：%s", self.name, exc)
             tool_errors.append(f"LLM 调用失败（降级模板）: {type(exc).__name__}: {exc}")
-            return self._template_report(query, context, tool_errors, sources, degraded=True)
+            report = self._template_report(query, context, tool_errors, sources, degraded=True)
+            return report.model_copy(update={"tools_used": tools})
         self.confidence = out.confidence  # 真实模式：置信度由 LLM 输出
         return AnalystReport(
             agent=self.name,
@@ -139,6 +233,7 @@ class AnalystAgent(BaseAgent[AnalystReport]):
             key_points=out.key_points,
             confidence=out.confidence,
             sources=sources,
+            tools_used=tools,
             tool_errors=tool_errors,
         )
 
@@ -170,7 +265,12 @@ class AnalystAgent(BaseAgent[AnalystReport]):
                 f"收盘 {market['price']}（涨跌 {market['change_pct']:+}%），"
                 f"MA5={market['ma5']}，MA20={market['ma20']}，MA60={market['ma60']}，"
                 f"RSI14={market['rsi']}，MACD DIF={market['macd_dif']} / DEA={market['macd_dea']}"
-                f" / 柱={market['macd_hist']:+}，成交量 {market['volume']} 手。"
+                f" / 柱={market['macd_hist']:+}，成交量 {market['volume']} 手；"
+                f"近 20 日年化波动率 {market.get('volatility_20d_pct', 0)}%，"
+                f"近 60 日最大回撤 {market.get('max_drawdown_60d_pct', 0)}%，"
+                f"ATR14 占价 {market.get('atr_pct', 0)}%，"
+                f"量比 {market.get('volume_ratio_5d', 1)}，"
+                f"60 日区间位置 {market.get('position_60d', 0.5)}。"
             )
         for c in context.get("rag_chunks", []):
             meta = c.get("metadata") or {}
@@ -291,7 +391,11 @@ class AnalystAgent(BaseAgent[AnalystReport]):
         summary = (
             f"{name}（{symbol}）最新收盘 {price:.2f}（{float(data['change_pct']):+.2f}%），"
             f"MA5={ma5:.2f} / MA20={ma20:.2f} / MA60={float(data['ma60']):.2f}；"
-            f"RSI14={rsi:.1f}；MACD DIF={dif:.4f} / DEA={dea:.4f} / 柱={hist:+.4f}。"
+            f"RSI14={rsi:.1f}；MACD DIF={dif:.4f} / DEA={dea:.4f} / 柱={hist:+.4f}；"
+            f"近 20 日年化波动率 {data.get('volatility_20d_pct', 0)}%，"
+            f"近 60 日最大回撤 {data.get('max_drawdown_60d_pct', 0)}%，"
+            f"量比 {data.get('volume_ratio_5d', 1)}，"
+            f"60 日区间位置 {data.get('position_60d', 0.5)}。"
             f"三信号投票 {bullish} 多 / {bearish} 空，综合技术面判断：{overall}。"
         )
         key_points = [
@@ -299,6 +403,12 @@ class AnalystAgent(BaseAgent[AnalystReport]):
             f"动量：{rsi_judge[0]}。",
             f"MACD：{macd_judge[0]}。",
         ]
+        vol_pct = data.get("volatility_20d_pct")
+        dd_pct = data.get("max_drawdown_60d_pct")
+        if vol_pct is not None and dd_pct is not None:
+            key_points.append(
+                f"风险量化：近 20 日年化波动率 {vol_pct}%，近 60 日最大回撤 {dd_pct}%。"
+            )
         source = (
             f"行情参考（{data.get('note')}）：{name} {data['date']} 收盘 {price}，"
             f"MA5={ma5}，RSI={rsi}，MACD柱={hist}"

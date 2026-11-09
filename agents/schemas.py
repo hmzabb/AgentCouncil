@@ -9,13 +9,13 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class AgentStatus(str, Enum):
+class AgentStatus(StrEnum):
     """Agent 执行状态。"""
 
     OK = "ok"
@@ -41,10 +41,13 @@ class AnalystReport(BaseAgentOutput):
     key_points: list[str] = Field(description="核心论点")
     confidence: float = Field(ge=0.0, le=1.0, description="置信度 [0,1]")
     sources: list[str] = Field(default_factory=list, description="依据来源（stub 为占位来源）")
+    tools_used: list[str] = Field(
+        default_factory=list, description="本次实际调用的工具（工具自采结果，供复现与评审）"
+    )
     tool_errors: list[str] = Field(default_factory=list, description="本报告调用工具的失败留痕（fail-open）")
 
     @model_validator(mode="after")
-    def _ok_requires_points(self) -> "AnalystReport":
+    def _ok_requires_points(self) -> AnalystReport:
         """业务约束：status=ok 时必须有核心论点；失败态（fail-open）不受限。"""
         if self.status is AgentStatus.OK and not self.key_points:
             raise ValueError("status=ok 时 key_points 不能为空")
@@ -59,6 +62,12 @@ class DebateRound(BaseModel):
     round_no: int = Field(ge=1, description="轮次序号")
     bull_argument: str = Field(description="多方论点")
     bear_argument: str = Field(description="空方论点")
+    bull_points: list[str] = Field(
+        default_factory=list, description="多方证据要点（BullAgent 独立产出）"
+    )
+    bear_points: list[str] = Field(
+        default_factory=list, description="空方对同轮多方的反驳要点（BearAgent 独立产出）"
+    )
     error: str | None = Field(default=None, description="本轮工具/执行失败留痕（fail-open）")
 
 
@@ -89,7 +98,10 @@ class RiskReviewReport(BaseAgentOutput):
 
     risk_level: Literal["低", "中", "高"] = Field(description="整体风险等级")
     risks: list[RiskItem] = Field(description="风险清单")
-    blocked: bool = Field(description="是否一票否决（stub 恒为 False）")
+    blocked: bool = Field(description="是否一票否决（由代码规则判定，非 LLM 决定）")
+    block_reason: str | None = Field(
+        default=None, description="一票否决的具体触发规则（blocked=True 时必填）"
+    )
     comment: str = Field(description="评审意见")
 
 
@@ -135,6 +147,50 @@ class DebateLlmOutput(BaseModel):
 
     bull_argument: str = Field(description="多方论点（引用数据或检索证据）")
     bear_argument: str = Field(description="空方论点（引用数据或检索证据）")
+
+
+class BullArgumentLlmOutput(BaseModel):
+    """多方 Agent 单轮输出（独立 Agent，与空方分属不同调用）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    argument: str = Field(description="多方论点（须引用给定数据或检索证据中的具体事实）")
+    evidence: list[str] = Field(
+        default_factory=list, max_length=6, description="支撑该论点的证据要点"
+    )
+
+
+class BearArgumentLlmOutput(BaseModel):
+    """空方 Agent 单轮输出（独立 Agent，需针对同轮多方论点做反驳）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    argument: str = Field(description="空方论点（须引用给定数据或检索证据中的具体事实）")
+    rebuttals: list[str] = Field(
+        default_factory=list, max_length=6, description="对同轮多方论点的具体反驳点"
+    )
+
+
+class ToolPlanLlmOutput(BaseModel):
+    """分析师工具自采规划输出（LLM 决策 → 代码白名单校验后执行）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tools: list[str] = Field(
+        min_length=1, max_length=4, description="拟调用的工具名（必须来自给定可选列表）"
+    )
+    reason: str = Field(description="选择这些工具的理由（中文，一句话）")
+
+
+class DebateSideOutput(BaseModel):
+    """多/空单方 Agent 输出（独立 Agent 之间共享同一结构，便于对称比较）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str = Field(description="产出方标识（bull_researcher / bear_researcher）")
+    argument: str = Field(default="", description="本方核心论点")
+    points: list[str] = Field(default_factory=list, description="证据要点或反驳要点")
+    error: str | None = Field(default=None, description="失败留痕（fail-open）")
 
 
 class DebateSynthesisLlmOutput(BaseModel):

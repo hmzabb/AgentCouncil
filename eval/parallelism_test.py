@@ -41,7 +41,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # 固定真实模式：须在导入 config 前设置（config 导入时加载 .env，dotenv 不覆盖已有变量）
 os.environ["MOCK_MODE"] = "false"
 
-import config as config_module  # noqa: E402
 from agents.schemas import AgentStatus  # noqa: E402
 from graph.builder import build_council_graph  # noqa: E402
 
@@ -98,7 +97,7 @@ def print_stages(label: str, stages: list[tuple[str, float]], total: float) -> N
 def main(argv: list[str] | None = None) -> int:
     """串行/并行各跑一次，输出耗时对比与加速比。"""
     parser = argparse.ArgumentParser(description="AgentCouncil 并行 vs 串行端到端耗时对比")
-    parser.add_argument("--query", default=DEFAULT_QUERY, help="股票代码（默认 %s）" % DEFAULT_QUERY)
+    parser.add_argument("--query", default=DEFAULT_QUERY, help=f"股票代码（默认 {DEFAULT_QUERY}）")
     args = parser.parse_args(argv)
 
     print(
@@ -118,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     speedup: float = serial_total / parallel_total
-    print(f"=== 对比结论 ===")
+    print("=== 对比结论 ===")
     print(f"  串行端到端：{serial_total:.2f}s")
     print(f"  并行端到端：{parallel_total:.2f}s")
     print(f"  加速比：{speedup:.2f}x（并行节省 {serial_total - parallel_total:.2f}s）")

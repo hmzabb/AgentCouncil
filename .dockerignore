@@ -1,0 +1,23 @@
+# 构建上下文排除项：只保留运行所需源码与配置示例
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+htmlcov
+.coverage
+.env
+eval/runs
+eval/reports
+eval/baselines
+docs
+photos
+data/raw
+*.log
+ab_out.txt
+api_out.txt
+api_out2.txt
+pip_out.txt
+smoke_out.txt

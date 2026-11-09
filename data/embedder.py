@@ -24,7 +24,7 @@ import config as config_module
 logger = logging.getLogger(__name__)
 
 # 全局单例 + 锁：避免图内多个工具/节点重复加载上 GB 的大模型
-_embedder: "BgeEmbedder | None" = None
+_embedder: BgeEmbedder | None = None
 _lock: threading.Lock = threading.Lock()
 
 

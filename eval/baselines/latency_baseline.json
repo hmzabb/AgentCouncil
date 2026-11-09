@@ -1,0 +1,27 @@
+{
+  "mode": "mock",
+  "ticker": "600519.SH",
+  "runs": 3,
+  "captured_at": "2026-11-04T16:49:43",
+  "summary": {
+    "wall_mean": 0.013,
+    "wall_stdev": 0.002,
+    "wall_p95": 0.015,
+    "wall_min": 0.011,
+    "wall_max": 0.015
+  },
+  "samples": [
+    {
+      "run": 1,
+      "wall_seconds": 0.015
+    },
+    {
+      "run": 2,
+      "wall_seconds": 0.013
+    },
+    {
+      "run": 3,
+      "wall_seconds": 0.011
+    }
+  ]
+}

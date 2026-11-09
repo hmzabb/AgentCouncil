@@ -14,13 +14,14 @@ fail-open 约定：任何异常（网络失败 / 停牌 / 代码非法）由 Bas
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timedelta
 from typing import Any
 
-import config as config_module
 from pydantic import BaseModel, Field
 
+import config as config_module
 from tools.base import BaseTool
 
 # ------------------------------------------------------------------ schema
@@ -49,6 +50,20 @@ class MarketDataResult(BaseModel):
     macd_dif: float
     macd_dea: float
     macd_hist: float = Field(description="MACD 柱（2*(DIF-DEA)）")
+    volatility_20d_pct: float = Field(
+        default=0.0, description="近 20 日收益率年化波动率（%，252 交易日年化）"
+    )
+    max_drawdown_60d_pct: float = Field(
+        default=0.0, description="近 60 日最大回撤（%，负数表示回撤幅度）"
+    )
+    atr14: float = Field(default=0.0, description="ATR14（真实波幅均值，价格单位）")
+    atr_pct: float = Field(default=0.0, description="ATR14 占收盘价比例（%）")
+    volume_ratio_5d: float = Field(
+        default=1.0, description="量比：近 5 日均量 / 近 20 日均量（>1 放量，<1 缩量）"
+    )
+    position_60d: float = Field(
+        default=0.5, ge=0.0, le=1.0, description="收盘价在近 60 日高低区间的位置（0=区间低点，1=高点）"
+    )
     note: str = Field(default="", description="数据来源说明（mock 时为【stub】标注）")
 
 
@@ -66,7 +81,7 @@ def normalize_symbol(symbol: str) -> str:
     return digits
 
 
-def fetch_history(symbol: str, days: int) -> "Any":  # 返回 pd.DataFrame，延迟导入不写死类型
+def fetch_history(symbol: str, days: int) -> Any:  # 返回 pd.DataFrame，延迟导入不写死类型
     """通过 AkShare 拉取前复权日线历史（近 days 个自然日窗口）。"""
     import akshare as ak  # 延迟导入：akshare 依赖较多，仅真实模式使用
 
@@ -90,8 +105,104 @@ def _pick_column(df: Any, *candidates: str) -> Any:
     raise KeyError(f"列不存在（候选: {candidates}），实际列: {list(df.columns)}")
 
 
+def _optional_column(df: Any, *candidates: str) -> Any:
+    """尽力而为读取列：不存在时返回 None（用于非必需列，如最高/最低价）。"""
+    for name in candidates:
+        if name in df.columns:
+            return df[name]
+    return None
+
+
+def compute_risk_metrics(
+    close: list[float],
+    high: list[float] | None = None,
+    low: list[float] | None = None,
+    volume: list[float] | None = None,
+) -> dict[str, float]:
+    """量化风险指标（纯 Python 实现，不依赖 pandas，可单测）。
+
+    输入为按时间正序的日线序列（最后一个元素为最新交易日）。全部指标由真实
+    序列计算；数据长度不足或输入缺失时该指标回退中性默认值（fail-open），
+    不伪造数值。
+
+    - volatility_20d_pct：近 20 个日收益率（样本标准差）× sqrt(252) 年化；
+    - max_drawdown_60d_pct：近 60 日内相对区间内前高的最大回撤（负数）；
+    - atr14 / atr_pct：Wilder ATR14 及其占收盘价比例（需 high/low）；
+    - volume_ratio_5d：近 5 日均量 / 近 20 日均量（量比，>1 放量、<1 缩量）；
+    - position_60d：收盘价在近 60 日 [最低, 最高] 区间的相对位置（0~1）。
+    """
+    out: dict[str, float] = {
+        "volatility_20d_pct": 0.0,
+        "max_drawdown_60d_pct": 0.0,
+        "atr14": 0.0,
+        "atr_pct": 0.0,
+        "volume_ratio_5d": 1.0,
+        "position_60d": 0.5,
+    }
+    if not close:
+        return out
+    price = close[-1]
+
+    # 1) 年化波动率：20 个日收益率 → 样本标准差 × sqrt(252)
+    if len(close) >= 21:
+        rets = [close[i] / close[i - 1] - 1.0 for i in range(len(close) - 20, len(close))]
+        mean = sum(rets) / len(rets)
+        var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+        out["volatility_20d_pct"] = round(math.sqrt(var) * math.sqrt(252) * 100, 2)
+
+    # 2) 最大回撤：近 60 日区间内相对前高的最大跌幅
+    window = close[-60:]
+    if len(window) >= 2:
+        peak = window[0]
+        worst = 0.0
+        for value in window:
+            peak = max(peak, value)
+            if peak > 0:
+                worst = min(worst, (value - peak) / peak)
+        out["max_drawdown_60d_pct"] = round(worst * 100, 2)
+
+    # 3) ATR14（Wilder）：TR = max(H-L, |H-C_prev|, |L-C_prev|)
+    if high and low and len(high) == len(close) and len(low) == len(close):
+        atr = 0.0
+        for i in range(1, len(close)):
+            tr = max(
+                high[i] - low[i],
+                abs(high[i] - close[i - 1]),
+                abs(low[i] - close[i - 1]),
+            )
+            atr = tr if i == 1 else atr + (tr - atr) / 14  # Wilder 平滑（alpha=1/14）
+        out["atr14"] = round(atr, 4)
+        out["atr_pct"] = round(atr / price * 100, 2) if price else 0.0
+
+    # 4) 量比：近 5 日均量 / 近 20 日均量
+    if volume and len(volume) >= 20:
+        avg20 = sum(volume[-20:]) / 20
+        if avg20 > 0:
+            out["volume_ratio_5d"] = round(sum(volume[-5:]) / 5 / avg20, 3)
+
+    # 5) 区间位置：收盘价在近 60 日 [最低, 最高] 的相对位置
+    window = close[-60:]
+    if len(window) >= 2:
+        lo, hi = min(window), max(window)
+        out["position_60d"] = round((price - lo) / (hi - lo), 4) if hi > lo else 0.5
+
+    return out
+
+
+def _risk_metrics(df: Any, close: Any) -> dict[str, float]:
+    """从日线 DataFrame 抽取序列并计算量化风险指标（列缺失即 fail-open）。"""
+    closes = [float(v) for v in close.tolist()]
+    high = _optional_column(df, "最高", "high")
+    low = _optional_column(df, "最低", "low")
+    volume_col = _optional_column(df, "成交量", "volume")
+    highs = [float(v) for v in high.tolist()] if high is not None else None
+    lows = [float(v) for v in low.tolist()] if low is not None else None
+    volumes = [float(v) for v in volume_col.tolist()] if volume_col is not None else None
+    return compute_risk_metrics(closes, highs, lows, volumes)
+
+
 def compute_indicators(df: Any) -> dict[str, float | str]:
-    """由日线历史计算 MA5/20/60、RSI14、MACD(12,26,9)，返回最新值。
+    """由日线历史计算 MA5/20/60、RSI14、MACD(12,26,9) 及量化风险指标，返回最新值。
 
     均线/MACD 使用前复权收盘价；RSI 为 Wilder 平滑。
     """
@@ -120,9 +231,11 @@ def compute_indicators(df: Any) -> dict[str, float | str]:
     date_val = str(_pick_column(df, "日期", "date").iloc[-1])[:10]
     change_pct = float(_pick_column(df, "涨跌幅", "change_pct").iloc[-1])
     volume = int(_pick_column(df, "成交量", "volume").iloc[-1])
+    price = float(close.iloc[-1])
+    metrics = _risk_metrics(df, close)
     return {
         "date": date_val,
-        "price": float(close.iloc[-1]),
+        "price": price,
         "change_pct": change_pct,
         "volume": volume,
         "ma5": round(ma5, 4),
@@ -132,6 +245,7 @@ def compute_indicators(df: Any) -> dict[str, float | str]:
         "macd_dif": round(float(dif.iloc[-1]), 4),
         "macd_dea": round(float(dea.iloc[-1]), 4),
         "macd_hist": round(float(hist.iloc[-1]), 4),
+        **metrics,
     }
 
 

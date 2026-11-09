@@ -23,5 +23,6 @@ fastapi>=0.110,<1             # SSE 流式服务（api/server.py）
 uvicorn>=0.29,<1              # ASGI 服务器
 httpx>=0.27,<1                # FastAPI TestClient 依赖（eval/api_test.py）
 
-# ----- 后续阶段预留 -----
-# Phase 5：ragas（LLM-as-Judge 评测）
+# ----- 测试与质量（Phase 5） -----
+pytest>=8,<9                  # 测试框架（smoke / api / robustness test）
+pytest-cov>=6,<7              # 覆盖率报告（pytest --cov）

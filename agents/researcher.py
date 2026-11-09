@@ -1,10 +1,14 @@
-"""研究员多空辩论：每轮产出一组多方/空方论点；最终轮产出收敛报告。
+"""研究员辩论编排：每轮驱动独立的多方 Agent 与空方 Agent 交锋；最终轮产出收敛报告。
 
 由 researcher_debate 节点按轮次驱动（conditional_edges + max_rounds 防死循环）。
+本轮结构（真实交锋，非单次双产出）：
+1. 取研报检索证据（research_rag，fail-open）；
+2. 多方 Agent（BullAgent）独立 LLM 调用产出做多论证；
+3. 空方 Agent（BearAgent）在拿到同轮多方论点后独立 LLM 调用，逐条反驳；
+4. 双方错误分别留痕，合并进 DebateRound.error。
 产出路径（按模式）：
-- MOCK_MODE=true：确定性占位论点模板（冒烟测试用）；
-- MOCK_MODE=false：DeepSeek LLM 基于研报检索证据 + 前轮辩论历史生成论点；
-  LLM 失败时 fail-open 降级为模板论点 + 错误留痕。
+- MOCK_MODE=true：双方各出确定性占位模板（冒烟测试用）；
+- MOCK_MODE=false：各自 DeepSeek 调用，单方失败 fail-open 降级模板 + 留痕。
 收敛报告（synthesize）同理：LLM 汇总多空历史，失败降级模板。
 """
 
@@ -15,40 +19,19 @@ from typing import Any
 
 import config as config_module  # 动态读取配置（测试期 reload_config 切换场景）
 from agents.base import BaseAgent
+from agents.debate import BearAgent, BullAgent, format_evidence, format_history
 from agents.llm import SYSTEM_ROLE_HINT, structured_call
 from agents.schemas import (
     AgentStatus,
-    DebateLlmOutput,
     DebateReport,
     DebateRound,
+    DebateSideOutput,
     DebateSynthesisLlmOutput,
 )
 from graph.state import CouncilState
 from tools.mock_tools import call_tool
 
 logger = logging.getLogger(__name__)
-
-# 确定性占位论点模板（mock / LLM 降级用），按轮次取模循环
-_BULL_TEMPLATES: tuple[str, ...] = (
-    "{marker}多方论点 A：{q} 基本面支撑仍在，回调不改中长期逻辑。",
-    "{marker}多方论点 B：{q} 行业景气度上行，估值消化后仍有空间。",
-    "{marker}多方论点 C：{q} 资金面边际改善，配置价值逐步显现。",
-)
-_BEAR_TEMPLATES: tuple[str, ...] = (
-    "{marker}空方论点 A：{q} 短期涨幅已透支部分预期，注意回调风险。",
-    "{marker}空方论点 B：{q} 宏观与流动性存在不确定性，安全边际不足。",
-    "{marker}空方论点 C：{q} 情绪过热，交易拥挤度偏高。",
-)
-
-_ROUND_SYSTEM_PROMPT: str = (
-    SYSTEM_ROLE_HINT
-    + "\n你的角色：多空辩论研究员，负责第 {round_no} 轮辩论。"
-    + "\n输出 JSON 对象，字段如下："
-    + "\n- bull_argument: 字符串，多方论点（引用检索证据或数据中的具体事实）；"
-    + "\n- bear_argument: 字符串，空方论点（引用检索证据或数据中的具体事实）。"
-    + "\n要求：中文；论点基于给定证据，不编造数据；观点要有交锋（针对上一轮可反驳）；"
-    + "不要输出【stub】字样。"
-)
 
 _SYNTHESIS_SYSTEM_PROMPT: str = (
     SYSTEM_ROLE_HINT
@@ -61,7 +44,7 @@ _SYNTHESIS_SYSTEM_PROMPT: str = (
 
 
 class ResearcherAgent(BaseAgent[DebateRound]):
-    """研究员：单轮多空辩论的产出者（LLM 主路径 + 模板降级）。"""
+    """研究员编排器：驱动独立多方/空方 Agent 完成一轮交锋（最终轮另产出收敛报告）。"""
 
     def __init__(self, round_no: int) -> None:
         """初始化本轮研究员。
@@ -73,80 +56,48 @@ class ResearcherAgent(BaseAgent[DebateRound]):
         self.round_no = round_no
 
     def execute(self, state: CouncilState) -> DebateRound:
+        """执行一轮辩论：多方先发言，空方在拿到多方论点后独立反驳。"""
         query: str = state["query"]
-        # 工具：研报检索（真实模式走 Milvus；mock 走占位数据）
+        # 工具：研报检索（真实模式走 Milvus；mock 走占位数据），双方共用同一证据集
         rag = call_tool("research_rag", query=f"{query} 多空辩论", top_k=2)
         chunks: list[dict[str, Any]] = rag.data["chunks"] if rag.ok and rag.data else []
         tool_error: str | None = (
             None if (rag.ok and rag.data) else f"research_rag: {rag.error or '无检索结果'}"
         )
+        evidence_text: str = format_evidence(chunks)
+        history_text: str = format_history(state.get("debate_history", []))
 
-        if config_module.CONFIG.mock_mode:
-            return self._template_round(query, chunks, tool_error, marker="【stub】")
-        try:
-            out: DebateLlmOutput = self._llm_round(query, chunks, state)
-        except Exception as exc:  # noqa: BLE001 —— fail-open：LLM 失败降级模板
-            logger.warning("研究员第 %d 轮 LLM 失败（降级模板）：%s", self.round_no, exc)
-            tool_error = f"{tool_error}；LLM 调用失败: {type(exc).__name__}: {exc}" if tool_error \
-                else f"LLM 调用失败: {type(exc).__name__}: {exc}"
-            return self._template_round(query, chunks, tool_error, marker="【降级模板】")
+        # 独立 Agent：两次互不共享生成上下文的 LLM 调用（mock 模式各自返回占位模板）
+        bull: DebateSideOutput = BullAgent(self.round_no).run(query, evidence_text, history_text)
+        bear: DebateSideOutput = BearAgent(self.round_no).run(
+            query, evidence_text, history_text, bull_argument=bull.argument
+        )
+
+        errors: list[str] = [
+            e for e in (tool_error, bull.error, bear.error) if e
+        ]
         return DebateRound(
             round_no=self.round_no,
-            bull_argument=out.bull_argument,
-            bear_argument=out.bear_argument,
-            error=tool_error,
+            bull_argument=self._annotate_evidence(bull.argument, chunks, tool_error),
+            bear_argument=bear.argument,
+            bull_points=list(bull.points),
+            bear_points=list(bear.points),
+            error="；".join(errors) if errors else None,
         )
 
-    # ---------- LLM 主路径 ----------
-
-    def _llm_round(
-        self, query: str, chunks: list[dict[str, Any]], state: CouncilState
-    ) -> DebateLlmOutput:
-        """构造本轮辩论提示词（检索证据 + 前轮交锋历史）并调用 LLM。"""
-        evidence = "\n".join(
-            f"【研报证据｜{((c.get('metadata') or {}).get('source') or c.get('doc_name'))}｜"
-            f"相似度 {c.get('score')}】{str(c['chunk_text'])[:300]}"
-            for c in chunks
-        ) or "（本轮无检索证据）"
-        history = state.get("debate_history", [])
-        history_text = ""
-        if history:
-            last = history[-1]
-            history_text = (
-                f"上一轮多方论点：{last.bull_argument[:200]}\n"
-                f"上一轮空方论点：{last.bear_argument[:200]}"
-            )
-        system = _ROUND_SYSTEM_PROMPT.format(round_no=self.round_no)
-        human = (
-            f"辩论主题：{query}\n"
-            f"{history_text}\n"
-            f"本轮检索证据：\n{evidence}\n"
-            f"请输出第 {self.round_no} 轮多空论点 JSON。"
-        )
-        return structured_call(DebateLlmOutput, system=system, human=human)
-
-    # ---------- 降级模板路径 ----------
-
-    def _template_round(
-        self, query: str, chunks: list[dict[str, Any]], tool_error: str | None, marker: str
-    ) -> DebateRound:
-        """模板论点（mock / LLM 降级共用，marker 区分【stub】/【降级模板】）。"""
-        idx: int = (self.round_no - 1) % len(_BULL_TEMPLATES)
+    @staticmethod
+    def _annotate_evidence(
+        argument: str, chunks: list[dict[str, Any]], tool_error: str | None
+    ) -> str:
+        """占位/降级论点缺少数据支撑，追加本轮检索情况说明（真实 LLM 论点原样返回）。"""
+        if not (argument.startswith("【stub】") or argument.startswith("【降级模板】")):
+            return argument
         if chunks:
             first = str(chunks[0]["chunk_text"])[:60]
-            evidence = f"（研报检索 {len(chunks)} 条，摘录：{first}…）"
-        elif tool_error:
-            evidence = "（研报检索失败，本轮论点不含检索证据）"
-        else:
-            evidence = "（研报检索无结果）"
-        bull: str = _BULL_TEMPLATES[idx].format(marker=marker, q=query) + evidence
-        bear: str = _BEAR_TEMPLATES[idx].format(marker=marker, q=query)
-        return DebateRound(
-            round_no=self.round_no,
-            bull_argument=bull,
-            bear_argument=bear,
-            error=tool_error,
-        )
+            return argument + f"（研报检索 {len(chunks)} 条，摘录：{first}…）"
+        if tool_error:
+            return argument + "（研报检索失败，本轮论点不含检索证据）"
+        return argument + "（研报检索无结果）"
 
     # ---------- 最终轮：辩论收敛报告 ----------
 
@@ -162,7 +113,10 @@ class ResearcherAgent(BaseAgent[DebateRound]):
         try:
             system = _SYNTHESIS_SYSTEM_PROMPT.format(query=query, rounds=total_rounds)
             history_text = "\n".join(
-                f"第 {i + 1} 轮多方：{h.bull_argument[:200]}\n第 {i + 1} 轮空方：{h.bear_argument[:200]}"
+                f"第 {i + 1} 轮多方：{h.bull_argument[:200]}"
+                + (f"（证据：{'；'.join(h.bull_points[:3])}）" if h.bull_points else "")
+                + f"\n第 {i + 1} 轮空方：{h.bear_argument[:200]}"
+                + (f"（反驳：{'；'.join(h.bear_points[:3])}）" if h.bear_points else "")
                 for i, h in enumerate(history)
             )
             out: DebateSynthesisLlmOutput = structured_call(

@@ -166,7 +166,17 @@ def run_to_markdown(run: dict[str, Any], judge_results: dict[str, Any] | None) -
 def summary_to_markdown(metrics: dict[str, Any], judge_results: dict[str, Any] | None) -> str:
     """渲染评测汇总 → Markdown。"""
     c = metrics["consistency"]
-    l = metrics["latency_seconds"]
+    lat = metrics["latency_seconds"]
+    conf_warning: str = ""
+    if c.get("confidence_frozen_warning"):
+        conf_warning = f"\n> ⚠️ **置信度冻结警告**：{c['confidence_frozen_warning']}\n"
+    # 按角色置信度统计
+    role_conf_lines: list[str] = []
+    for role, stats in c.get("analyst_confidence_by_role", {}).items():
+        role_conf_lines.append(
+            f"  - {role}：均值 {stats['mean']}，标准差 {stats['stdev']}，极差 {stats['range']}"
+        )
+    role_conf_text: str = "\n".join(role_conf_lines) if role_conf_lines else "  （无数据）"
     lines: list[str] = [
         "# AgentCouncil 真实评测汇总",
         "",
@@ -176,17 +186,20 @@ def summary_to_markdown(metrics: dict[str, Any], judge_results: dict[str, Any] |
         "",
         f"- 评级分布：{c['rating_counts']}",
         f"- 众数评级：**{c['mode_rating']}**，一致率 {c['consistency_ratio']:.0%}（{c['rating_counts'][c['mode_rating']]}/{metrics['runs']}）",
-        f"- 置信度：均值 {c['confidence_mean']}，标准差 {c['confidence_stdev']}",
+        f"- 最终置信度：均值 {c['confidence_mean']}，标准差 {c['confidence_stdev']}，极差 {c['confidence_range']}",
+        f"- 置信度冻结：{'**是** ⚠️' if c.get('confidence_frozen') else '否'}",
+        f"{conf_warning}",
+        "- 各角色分析师置信度变化（跨运行）：",
+        f"{role_conf_text}",
         "",
         "## 2. 延迟（真实墙钟，秒）",
         "",
-        f"| 指标 | 端到端 | 分析师并行 | 辩论 | 风控 | 经理 |",
+        "| 指标 | 端到端 | 分析师并行 | 辩论 | 风控 | 经理 |",
         "| --- | --- | --- | --- | --- | --- |",
-        f"| 均值 | {l['mean']} | {l['by_stage']['analyst_parallel']['mean']} | {l['by_stage']['debate']['mean']} | {l['by_stage']['risk_review']['mean']} | {l['by_stage']['manager_summarize']['mean']} |",
-        f"| P95/最大 | {l['p95']} | {l['by_stage']['analyst_parallel']['max']} | {l['by_stage']['debate']['max']} | {l['by_stage']['risk_review']['max']} | {l['by_stage']['manager_summarize']['max']} |",
-        f"| 最小 | {l['min']} | - | - | - | - |",
-        "",
-        f"（逐次样本：{l['samples']}）",
+        f"| 均值 | {lat['mean']} | {lat['by_stage']['analyst_parallel']['mean']} | {lat['by_stage']['debate']['mean']} | {lat['by_stage']['risk_review']['mean']} | {lat['by_stage']['manager_summarize']['mean']} |",
+        f"| P95/最大 | {lat['p95']} | {lat['by_stage']['analyst_parallel']['max']} | {lat['by_stage']['debate']['max']} | {lat['by_stage']['risk_review']['max']} | {lat['by_stage']['manager_summarize']['max']} |",
+        f"| 最小 | {lat['min']} | - | - | - | - |",
+        f"（逐次样本：{lat['samples']}）",
         "",
         "## 3. 确定性质量指标",
         "",
@@ -210,6 +223,21 @@ def summary_to_markdown(metrics: dict[str, Any], judge_results: dict[str, Any] |
             f"- 辩论有效性（{dq.get('n', 0)} 次）：多方交锋 {dq['bull_engagement']['mean']}/5，"
             f"空方交锋 {dq['bear_engagement']['mean']}/5，对立覆盖 {dq['opposing_coverage']['mean']}/5",
             f"- 评审失败次数：{s.get('judge_failures', 0)}",
+            "",
+        ]
+    # token 成本
+    tc = metrics.get("token_cost", {}).get("per_run", {})
+    if tc:
+        lines += [
+            "## 5. Token 用量与成本",
+            "",
+            f"- 每次运行 LLM 调用：{tc['call_count']['mean']:.0f} 次",
+            f"- Input tokens/次：均值 {tc['prompt_tokens']['mean']:.0f}（{tc['prompt_tokens']['min']}-{tc['prompt_tokens']['max']}）",
+            f"- Output tokens/次：均值 {tc['completion_tokens']['mean']:.0f}（{tc['completion_tokens']['min']}-{tc['completion_tokens']['max']}）",
+            f"- 每次成本：均值 **${tc['cost_usd']['mean']:.4f}**，{metrics['runs']} 次合计 **${tc['cost_usd']['total']:.4f}**",
+            f"- 预估 100 次评测成本：**${tc['cost_usd']['mean'] * 100:.2f}**",
+            "",
+            f"> {metrics.get('token_cost', {}).get('pricing_note', '')}",
             "",
         ]
     return "\n".join(lines)
@@ -332,9 +360,23 @@ def run_to_html(run: dict[str, Any], judge_results: dict[str, Any] | None) -> st
 def summary_to_html(metrics: dict[str, Any], judge_results: dict[str, Any] | None) -> str:
     """渲染评测汇总 → 自包含 HTML。"""
     c = metrics["consistency"]
-    l = metrics["latency_seconds"]
+    lat = metrics["latency_seconds"]
     rating_rows = "".join(
         f'<tr><td>{_esc(k)}</td><td>{v}</td></tr>' for k, v in c["rating_counts"].items()
+    )
+    conf_frozen_html: str = ""
+    # 注意：Python 3.11 的 f-string 表达式内不允许反斜杠转义、也不能复用外层引号，
+    # 故此处先算成普通变量再插入（本地 3.14 能跑、CI 3.11 会 SyntaxError 的典型坑）。
+    conf_frozen_text: str = '<b class="error">是 ⚠️</b>' if c.get("confidence_frozen") else "否"
+    if c.get("confidence_frozen"):
+        conf_frozen_html = (
+            '<p class="error">⚠️ 置信度冻结警告：所有运行置信度完全相同。'
+            '可能原因：1) LLM temperature 过低（当前 0.2）；'
+            '2) 短时间内数据无变化；3) 综合置信度精度截断。</p>'
+        )
+    role_rows: str = "".join(
+        f'<tr><td>{_esc(role)}</td><td>{stats["mean"]}</td><td>{stats["stdev"]}</td><td>{stats["range"]}</td></tr>'
+        for role, stats in c.get("analyst_confidence_by_role", {}).items()
     )
     judge_section = ""
     if judge_results:
@@ -364,17 +406,21 @@ def summary_to_html(metrics: dict[str, Any], judge_results: dict[str, Any] | Non
         f"<tr><th>评级</th><th>次数</th></tr>{rating_rows}</table>"
         f"<p>众数评级：<b>{_esc(c['mode_rating'])}</b> ｜ 一致率："
         f"<span class=\"score\">{c['consistency_ratio']:.0%}</span> ｜ "
-        f"置信度均值 {c['confidence_mean']}（标准差 {c['confidence_stdev']}）</p></div>"
+        f"置信度均值 {c['confidence_mean']}（标准差 {c['confidence_stdev']}，极差 {c['confidence_range']}）｜ "
+        f"置信度冻结：{conf_frozen_text}</p>"
+        f"{conf_frozen_html}"
+        f"<h3>各角色分析师置信度变化</h3><table>"
+        f"<tr><th>角色</th><th>均值</th><th>标准差</th><th>极差</th></tr>{role_rows}</table></div>"
         f'<div class="card"><h2>2. 延迟（真实墙钟，秒）</h2><table>'
         "<tr><th>指标</th><th>端到端</th><th>分析师并行</th><th>辩论</th><th>风控</th><th>经理</th></tr>"
-        f"<tr><td>均值</td><td>{l['mean']}</td><td>{l['by_stage']['analyst_parallel']['mean']}</td>"
-        f"<td>{l['by_stage']['debate']['mean']}</td><td>{l['by_stage']['risk_review']['mean']}</td>"
-        f"<td>{l['by_stage']['manager_summarize']['mean']}</td></tr>"
-        f"<tr><td>P95/最大</td><td class=\"score\">{l['p95']}</td><td>{l['by_stage']['analyst_parallel']['max']}</td>"
-        f"<td>{l['by_stage']['debate']['max']}</td><td>{l['by_stage']['risk_review']['max']}</td>"
-        f"<td>{l['by_stage']['manager_summarize']['max']}</td></tr>"
-        f"<tr><td>最小</td><td>{l['min']}</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
-        f"</table><p class=\"meta\">逐次样本：{l['samples']}</p></div>"
+        f"<tr><td>均值</td><td>{lat['mean']}</td><td>{lat['by_stage']['analyst_parallel']['mean']}</td>"
+        f"<td>{lat['by_stage']['debate']['mean']}</td><td>{lat['by_stage']['risk_review']['mean']}</td>"
+        f"<td>{lat['by_stage']['manager_summarize']['mean']}</td></tr>"
+        f"<tr><td>P95/最大</td><td class=\"score\">{lat['p95']}</td><td>{lat['by_stage']['analyst_parallel']['max']}</td>"
+        f"<td>{lat['by_stage']['debate']['max']}</td><td>{lat['by_stage']['risk_review']['max']}</td>"
+        f"<td>{lat['by_stage']['manager_summarize']['max']}</td></tr>"
+        f"<tr><td>最小</td><td>{lat['min']}</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
+        f"</table><p class=\"meta\">逐次样本：{lat['samples']}</p></div>"
         f'<div class="card"><h2>3. 确定性质量指标</h2><ul>'
         f"<li>引用来源比例（报告带工具来源）：<span class=\"score\">"
         f"{metrics['deterministic_quality']['citation_ratio']:.0%}</span></li>"
@@ -384,7 +430,22 @@ def summary_to_html(metrics: dict[str, Any], judge_results: dict[str, Any] | Non
         f"</ul></div>"
         f"{judge_section}"
     )
-    return f"<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" \
+    # token 成本（如果存在）
+    tc = metrics.get("token_cost", {}).get("per_run", {})
+    if tc:
+        token_html = (
+            f'<div class="card"><h2>5. Token 用量与成本</h2><ul>'
+            f"<li>每次运行 LLM 调用：{tc['call_count']['mean']:.0f} 次</li>"
+            f"<li>Input tokens/次：均值 {tc['prompt_tokens']['mean']:.0f}（{tc['prompt_tokens']['min']}-{tc['prompt_tokens']['max']}）</li>"
+            f"<li>Output tokens/次：均值 {tc['completion_tokens']['mean']:.0f}（{tc['completion_tokens']['min']}-{tc['completion_tokens']['max']}）</li>"
+            f"<li>每次成本：均值 <b>${tc['cost_usd']['mean']:.4f}</b>，{metrics['runs']} 次合计 <b>${tc['cost_usd']['total']:.4f}</b></li>"
+            f"<li>预估 100 次评测成本：<b>${tc['cost_usd']['mean'] * 100:.2f}</b></li>"
+            f'</ul><p class="meta">定价：{metrics.get("token_cost", {}).get("pricing_note", "")}</p></div>'
+        )
+    else:
+        token_html = ""
+    body += token_html
+    return "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" \
         "<title>AgentCouncil 真实评测汇总</title><style>" + _CSS + "</style></head>" \
         f"<body>{body}</body></html>"
 

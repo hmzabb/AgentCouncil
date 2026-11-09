@@ -21,9 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # 固定 mock 链路（确定性）：须在导入 config 前设置
 os.environ["MOCK_MODE"] = "true"
 
-import config as config_module  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+import config as config_module  # noqa: E402
 from api.server import app  # noqa: E402
 
 client = TestClient(app)
@@ -46,7 +46,7 @@ def _parse_sse(body: str) -> list[tuple[str, dict[str, Any]]]:
 def _collect_stream(query: str) -> list[tuple[str, dict[str, Any]]]:
     """发起一次 SSE 请求并收集全部事件（TestClient 流式读取）。"""
     chunks: list[str] = []
-    with client.stream("GET", f"/stream", params={"query": query}) as resp:
+    with client.stream("GET", "/stream", params={"query": query}) as resp:
         assert resp.status_code == 200, f"SSE 请求失败: {resp.status_code}"
         assert resp.headers["content-type"].startswith("text/event-stream")
         for line in resp.iter_lines():
@@ -55,7 +55,7 @@ def _collect_stream(query: str) -> list[tuple[str, dict[str, Any]]]:
 
 
 def scenario_1_health_and_analyze() -> None:
-    """场景 1：/health 存活检查 + POST /analyze 非流式最终决策。"""
+    """场景 1：/health 存活检查 + POST /analyze 非流式最终决策 + /metrics 指标。"""
     h = client.get("/health")
     assert h.status_code == 200 and h.json()["status"] == "ok", f"health 异常: {h.json()}"
     r = client.post("/analyze", json={"query": "600519.SH"})
@@ -64,7 +64,22 @@ def scenario_1_health_and_analyze() -> None:
     assert decision["rating"] in {"买入", "增持", "中性", "减持", "卖出"}, f"评级非法: {decision['rating']}"
     assert 0.0 <= decision["confidence"] <= 1.0
     assert decision["summary"] and decision["reasoning"]
-    print(f"[1/3] health + analyze PASS：评级 {decision['rating']}，置信度 {decision['confidence']}")
+    # /metrics：真实请求必须已被计数（Prometheus 文本格式可解析）
+    m = client.get("/metrics")
+    assert m.status_code == 200 and m.headers["content-type"].startswith("text/plain")
+    text: str = m.text
+    assert 'path="/analyze"' in text, "analyze 请求未被指标计数"
+    assert "agentcouncil_tool_cache_hits_total" in text, "缺少工具缓存命中指标"
+    assert "agentcouncil_mock_mode 1" in text, "mock 模式指标异常"
+    counted: int = sum(
+        int(line.rsplit(" ", 1)[1]) for line in text.splitlines()
+        if line.startswith("agentcouncil_http_requests_total") and 'path="/analyze"' in line
+    )
+    assert counted >= 1, f"analyze 计数异常: {counted}"
+    print(
+        f"[1/3] health + analyze + metrics PASS：评级 {decision['rating']}，"
+        f"置信度 {decision['confidence']}，analyze 计数 {counted}"
+    )
 
 
 def scenario_2_sse_event_sequence() -> None:

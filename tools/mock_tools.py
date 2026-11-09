@@ -15,13 +15,14 @@ financials / news），保证 mock/真实两种模式字段对齐。
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable
 
-import config as config_module  # 动态读取配置（支持测试期 reload_config 切换场景）
 from pydantic import BaseModel, ConfigDict, Field
 
+import config as config_module  # 动态读取配置（支持测试期 reload_config 切换场景）
 from tools.base import BaseTool, ToolResult
+from tools.cache import TTLCache, make_cache_key
 from tools.financials import (  # 复用真实 schema
     FinancialMetrics,
     GetFinancialsArgs,
@@ -30,7 +31,6 @@ from tools.financials import (  # 复用真实 schema
 from tools.market_data import GetMarketDataArgs, MarketDataResult  # 复用真实 schema
 from tools.news import GetNewsArgs, GetNewsResult, NewsItem  # 复用真实 schema
 from tools.rag import RagChunk, ResearchRagArgs, ResearchRagResult  # 复用真实 schema
-
 
 # ---------------------------------------------------------------- 行情（mock）
 
@@ -60,6 +60,12 @@ class GetMarketDataTool(BaseTool):
             macd_dif=1.21,
             macd_dea=1.05,
             macd_hist=0.32,
+            volatility_20d_pct=25.4,
+            max_drawdown_60d_pct=-7.8,
+            atr14=2.15,
+            atr_pct=2.14,
+            volume_ratio_5d=1.06,
+            position_60d=0.55,
             note="【stub】假数据",
         )
 
@@ -277,6 +283,26 @@ _register_real("research_rag", _make_real_research_rag)
 _register_real("get_financials", _make_real_get_financials)
 _register_real("get_news", _make_real_get_news)
 
+# 各工具独立的 TTL 缓存（TTL 每次调用时按 config 动态刷新，支持 reload_config）
+_TOOL_CACHES: dict[str, TTLCache] = {}
+
+
+def _cache_for(name: str) -> TTLCache:
+    """获取（或创建）工具缓存，并按当前配置刷新 TTL。
+
+    RAG 检索结果相对稳定（研报不常变），TTL 更长；行情/财务/新闻更新更快。
+    """
+    cache: TTLCache | None = _TOOL_CACHES.get(name)
+    if cache is None:
+        cache = TTLCache(ttl_s=1)
+        _TOOL_CACHES[name] = cache
+    cache.ttl_s = (
+        config_module.CONFIG.rag_cache_ttl_s
+        if name == "research_rag"
+        else config_module.CONFIG.tool_cache_ttl_s
+    )
+    return cache
+
 
 def call_tool(name: str, **kwargs: object) -> ToolResult:
     """统一工具调用入口（mock / 真实双模式路由）。
@@ -284,18 +310,33 @@ def call_tool(name: str, **kwargs: object) -> ToolResult:
     - MOCK_MODE=false 且工具已有真实实现 → 调用真实实现；真实实现初始化
       失败（依赖未装 / 服务未启动）同样 fail-open 返回 ok=False，绝不回退
       到假数据；
+    - 真实模式下成功结果按 TTL 缓存（同一标的短时间重复查询不再打外部接口）；
+      失败结果不缓存，避免把瞬时故障固化为缓存；
     - 未知工具名同样 fail-open：返回 ok=False 的结果，而非抛 KeyError。
     """
     if not config_module.CONFIG.mock_mode and name in _REAL_TOOL_FACTORIES:
+        cache: TTLCache = _cache_for(name)
+        key: str = make_cache_key(name, dict(kwargs))
+        hit, cached = cache.get(key)
+        if hit:
+            return cached.model_copy(deep=True)  # 防止下游修改污染缓存
         try:
-            return _REAL_TOOL_FACTORIES[name]().invoke(**kwargs)
+            result: ToolResult = _REAL_TOOL_FACTORIES[name]().invoke(**kwargs)
         except Exception as exc:  # noqa: BLE001 —— fail-open：真实工具不可用时留痕
             return ToolResult(
                 tool=name,
                 ok=False,
                 error=f"真实工具初始化失败: {type(exc).__name__}: {exc}",
             )
+        if result.ok:
+            cache.set(key, result)
+        return result
     tool: BaseTool | None = MOCK_TOOLS.get(name)
     if tool is None:
         return ToolResult(tool=name, ok=False, error=f"未注册的工具: {name}")
     return tool.invoke(**kwargs)
+
+
+def tool_cache_stats() -> dict[str, dict[str, int]]:
+    """返回各工具缓存命中统计（供 /health 等可观测性端点使用）。"""
+    return {name: cache.stats() for name, cache in _TOOL_CACHES.items()}

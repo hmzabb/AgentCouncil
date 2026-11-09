@@ -14,12 +14,20 @@ bge 嵌入），mock_mode=False（默认）时工具走真实实现；真实工�
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
 # 加载 .env（不存在则静默跳过）；须放在读取环境变量之前
 load_dotenv()
+
+
+def _default_hf_home() -> str:
+    """跨平台 HF 缓存默认目录：优先环境变量，否则落到用户主目录（不写死盘符）。"""
+    explicit: str | None = os.getenv("HF_HOME")
+    if explicit:
+        return explicit
+    return os.path.join(os.path.expanduser("~"), ".cache", "agentcouncil", "hf")
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -44,6 +52,31 @@ def _get_int(name: str, default: int, minimum: int | None = None) -> int:
     return value
 
 
+def _get_float(
+    name: str,
+    default: float,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    """读取浮点型环境变量；非法值回退默认值，并受上下限约束（fail-open）。
+
+    比例型配置（如 0~1 的区间位置）必须带上限：误配成 1.5 会让规则永远
+    无法触发——这种「静默失效」比直接报错更难排查。
+    """
+    raw: str | None = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value: float = float(raw)
+    except ValueError:
+        return default
+    if minimum is not None:
+        value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+
 @dataclass(frozen=True)
 class CouncilConfig:
     """AgentCouncil 运行配置。
@@ -60,7 +93,25 @@ class CouncilConfig:
         market_history_days:  行情历史回看窗口（自然日），用于 MA/RSI/MACD 计算。
         tool_timeout_s:       单次工具调用硬超时（秒）；超时即 fail-open 降级，
                               防止阻塞式实现（Milvus RPC / 第三方 HTTP）把整条图卡死。
-        deepseek_*:           DeepSeek 接入预留字段（OpenAI 兼容，尚未使用）。
+        pipeline_deadline_s:  全链路墙钟预算（秒）：超过即停止发起新的 LLM/工具调用，
+                              保证最坏耗时可控（默认 300s）。
+        tool_cache_ttl_s:     行情/财务/新闻工具结果缓存 TTL（秒）；0 表示禁用。
+        rag_cache_ttl_s:      研报检索结果缓存 TTL（秒）；0 表示禁用。
+        llm_cache_ttl_s:      LLM 结构化输出缓存 TTL（秒）；0 表示禁用。
+        api_token:            非空时启用 HTTP Bearer 鉴权（空 = 本地开放，仅演示用）。
+        rate_limit_per_min:   单 IP 每分钟请求上限；0 表示不限流。
+        risk_veto_on_missing_data: True 时「分析师无有效产出」触发风控一票否决
+                              （信息完全不可用时不输出投资结论）。
+        risk_veto_rsi_floor:  技术面破位否决的 RSI 下限：空头排列 + MACD 柱为负
+                              且 RSI 低于该值时触发否决。
+        risk_extreme_move_pct: 单日涨跌幅绝对值达到该值（%）时追加「极端波动」高风险项。
+        risk_veto_annual_vol_pct: 高波动否决（V3）的年化波动率下限（%）：近 20 日年化波动率
+                              与近 60 日最大回撤同时达标时否决。
+        risk_veto_drawdown_pct:   高波动否决（V3）的近 60 日最大回撤下限（%）。
+        risk_atr_spike_pct:   ATR14 占收盘价比例达到该值（%）时追加「ATR 放大」风险项。
+        risk_divergence_position: 量价背离规则的 60 日区间位置下限（0~1，越接近 1 越靠近区间高点）。
+        risk_divergence_ratio:    量价背离规则的量比上限（低于该值视为缩量）。
+        deepseek_*:           DeepSeek 接入配置（OpenAI 兼容）。
     """
 
     mock_mode: bool = False
@@ -72,16 +123,30 @@ class CouncilConfig:
     milvus_collection: str = "research_docs"
     bge_model: str = "BAAI/bge-large-zh-v1.5"
     hf_endpoint: str = "https://hf-mirror.com"
-    hf_home: str = "D:/Python/hf-cache"
+    hf_home: str = field(default_factory=_default_hf_home)
     market_history_days: int = 400
     tool_timeout_s: int = 180
+    pipeline_deadline_s: int = 300
+    tool_cache_ttl_s: int = 300
+    rag_cache_ttl_s: int = 3600
+    llm_cache_ttl_s: int = 3600
+    api_token: str = ""
+    rate_limit_per_min: int = 0
+    risk_veto_on_missing_data: bool = True
+    risk_veto_rsi_floor: float = 35.0
+    risk_extreme_move_pct: float = 9.5
+    risk_veto_annual_vol_pct: float = 60.0
+    risk_veto_drawdown_pct: float = 25.0
+    risk_atr_spike_pct: float = 5.0
+    risk_divergence_position: float = 0.8
+    risk_divergence_ratio: float = 0.8
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
 
     @classmethod
-    def from_env(cls) -> "CouncilConfig":
+    def from_env(cls) -> CouncilConfig:
         """从环境变量构建配置（.env 已由本模块在导入时加载）。"""
         return cls(
             mock_mode=_get_bool("MOCK_MODE", False),
@@ -92,9 +157,30 @@ class CouncilConfig:
             milvus_collection=os.getenv("MILVUS_COLLECTION", "research_docs"),
             bge_model=os.getenv("BGE_MODEL", "BAAI/bge-large-zh-v1.5"),
             hf_endpoint=os.getenv("HF_ENDPOINT", "https://hf-mirror.com"),
-            hf_home=os.getenv("HF_HOME", "D:/Python/hf-cache"),
+            hf_home=_default_hf_home(),
             market_history_days=_get_int("MARKET_HISTORY_DAYS", 400, minimum=60),
             tool_timeout_s=_get_int("TOOL_TIMEOUT_S", 180, minimum=10),
+            pipeline_deadline_s=_get_int("PIPELINE_DEADLINE_S", 300, minimum=30),
+            tool_cache_ttl_s=_get_int("TOOL_CACHE_TTL_S", 300, minimum=0),
+            rag_cache_ttl_s=_get_int("RAG_CACHE_TTL_S", 3600, minimum=0),
+            llm_cache_ttl_s=_get_int("LLM_CACHE_TTL_S", 3600, minimum=0),
+            api_token=os.getenv("API_TOKEN", ""),
+            rate_limit_per_min=_get_int("RATE_LIMIT_PER_MIN", 0, minimum=0),
+            risk_veto_on_missing_data=_get_bool("RISK_VETO_ON_MISSING_DATA", True),
+            risk_veto_rsi_floor=_get_float("RISK_VETO_RSI_FLOOR", 35.0, minimum=0.0, maximum=100.0),
+            risk_extreme_move_pct=_get_float("RISK_EXTREME_MOVE_PCT", 9.5, minimum=0.0),
+            risk_veto_annual_vol_pct=_get_float(
+                "RISK_VETO_ANNUAL_VOL_PCT", 60.0, minimum=0.0
+            ),
+            risk_veto_drawdown_pct=_get_float("RISK_VETO_DRAWDOWN_PCT", 25.0, minimum=0.0),
+            risk_atr_spike_pct=_get_float("RISK_ATR_SPIKE_PCT", 5.0, minimum=0.0),
+            risk_divergence_position=_get_float(
+                "RISK_DIVERGENCE_POSITION", 0.8, minimum=0.0, maximum=1.0
+            ),
+            # 量比阈值不设上限：>1 表示「低于略高于均量的水平即视为缩量」，是合法口径
+            risk_divergence_ratio=_get_float(
+                "RISK_DIVERGENCE_RATIO", 0.8, minimum=0.0
+            ),
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
             deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
